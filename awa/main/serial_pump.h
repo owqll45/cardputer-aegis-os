@@ -1,0 +1,34 @@
+/*
+ * SerialPump - 系统级串口指令泵
+ *
+ * 解决问题:
+ * 1. LegacyApp 未运行时没人读串口 -> USB CDC 缓冲堆满 -> 主机 write 超时/设备卡死
+ * 2. 菜单状态下控制台指令无法响应
+ *
+ * 方案: 主循环持续非阻塞读 stdin(USB CDC), 行指令:
+ *   - 若有 handler (LegacyApp 运行中) -> 立即转发
+ *   - 否则存入待处理队列 (LegacyApp 打开时消费)
+ */
+#pragma once
+#include <string>
+#include <deque>
+#include <functional>
+
+namespace SerialPump {
+
+using Handler = std::function<void(const std::string&)>;
+
+// 注册/注销指令处理器 (LegacyApp onOpen/onClose 调用)
+void setHandler(Handler h);
+void clearHandler();
+
+// 主循环调用: 非阻塞读 + 分行 + 转发/排队 (永不阻塞)
+void pump();
+
+// 取出一条待处理指令 (LegacyApp 消费); 无则返回空串
+std::string popPending();
+
+// 待处理队列长度
+size_t pendingCount();
+
+} // namespace SerialPump

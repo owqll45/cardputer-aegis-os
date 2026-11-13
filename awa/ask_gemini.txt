@@ -1,0 +1,497 @@
+请帮我审查以下启动器组件的视图代码，检查是否有 bug、内存泄漏、逻辑错误或其他问题。
+
+# 菜单视图 (menu.cpp)
+```cpp
+/*
+ * SPDX-FileCopyrightText: 2025 M5Stack Technology CO LTD
+ *
+ * SPDX-License-Identifier: MIT
+ */
+#include "menu.h"
+#include "../../app_launcher.h"
+#include <apps/utils/theme.h>
+#include <apps/utils/common.h>
+#include <apps/utils/icons/generated_icons.h>
+#include <mooncake_log.h>
+#include <mooncake.h>
+#include <hal/hal.h>
+#include <string>
+#include <math.h>
+#include <map>
+#include <algorithm>
+
+using namespace mooncake;
+using namespace smooth_ui_toolkit;
+
+static const std::string _tag = "LauncherMenu";
+
+// Static AppIcon wrappers for generated icons
+static AppIcon_t icon_snake(icon_snake_generated, icon_snake_generated);
+static AppIcon_t icon_tetris(icon_tetris_generated, icon_tetris_generated);
+static AppIcon_t icon_breakout(icon_breakout_generated, icon_breakout_generated);
+static AppIcon_t icon_water(icon_water_generated, icon_water_generated);
+static AppIcon_t icon_minesweeper(icon_minesweeper_generated, icon_minesweeper_generated);
+static AppIcon_t icon_flappy(icon_flappy_generated, icon_flappy_generated);
+static AppIcon_t icon_invaders(icon_invaders_generated, icon_invaders_generated);
+static AppIcon_t icon_pong(icon_pong_generated, icon_pong_generated);
+static AppIcon_t icon_generic(icon_generic_generated, icon_generic_generated);
+
+// New Icons
+static AppIcon_t icon_dino(icon_dino_generated, icon_dino_generated);
+static AppIcon_t icon_cube3d(icon_cube3d_generated, icon_cube3d_generated);
+static AppIcon_t icon_dice(icon_dice_generated, icon_dice_generated);
+static AppIcon_t icon_timer(icon_timer_generated, icon_timer_generated);
+static AppIcon_t icon_stopwatch(icon_stopwatch_generated, icon_stopwatch_generated);
+static AppIcon_t icon_flashlight(icon_flashlight_generated, icon_flashlight_generated);
+static AppIcon_t icon_sysinfo(icon_sysinfo_generated, icon_sysinfo_generated);
+static AppIcon_t icon_matrix(icon_matrix_generated, icon_matrix_generated);
+static AppIcon_t icon_drum(icon_drum_generated, icon_drum_generated);
+static AppIcon_t icon_piano(icon_piano_generated, icon_piano_generated);
+static AppIcon_t icon_sketch(icon_sketch_generated, icon_sketch_generated);
+static AppIcon_t icon_ruler(icon_ruler_generated, icon_ruler_generated);
+static AppIcon_t icon_coin(icon_coin_generated, icon_coin_generated);
+static AppIcon_t icon_breathing(icon_breathing_generated, icon_breathing_generated);
+static AppIcon_t icon_musicbox(icon_musicbox_generated, icon_musicbox_generated);
+
+// Folder Icon (Use generic for now or create one dynamically)
+// We can use icon_generic for folders
+
+static void* get_icon_for_app(const std::string& name, void* defaultIcon) {
+    if (defaultIcon != nullptr) return defaultIcon;
+    
+    if (name == "Snake") return &icon_snake;
+    if (name == "Tetris") return &icon_tetris;
+    if (name == "Breakout") return &icon_breakout;
+    if (name == "Water Level") return &icon_water;
+    if (name == "Minesweeper") return &icon_minesweeper;
+    if (name == "Flappy") return &icon_flappy;
+    if (name == "Invaders") return &icon_invaders;
+    if (name == "Pong") return &icon_pong;
+    
+    // New Apps
+    if (name == "Dino") return &icon_dino;
+    if (name == "Cube3D") return &icon_cube3d;
+    if (name == "Dice") return &icon_dice;
+    if (name == "Timer") return &icon_timer;
+    if (name == "Stopwatch") return &icon_stopwatch;
+    if (name == "Flashlight") return &icon_flashlight;
+    if (name == "SysInfo") return &icon_sysinfo;
+    if (name == "Matrix") return &icon_matrix;
+    if (name == "Drum") return &icon_drum;
+    if (name == "Piano") return &icon_piano;
+    if (name == "Sketch") return &icon_sketch;
+    if (name == "Ruler") return &icon_ruler;
+    if (name == "Coin") return &icon_coin;
+    if (name == "Breathing") return &icon_breathing;
+    if (name == "MusicBox") return &icon_musicbox;
+    
+    return &icon_generic;
+}
+
+void LauncherMenu::init(int launcherAppId)
+{
+    mclog::tagInfo(_tag, "init");
+
+    // Initialize Folders
+    _folders.clear();
+    _folders.push_back({"Games", {}});
+    _folders.push_back({"Tools", {}});
+    _folders.push_back({"System", {}});
+    
+    // Define Categories
+    std::vector<std::string> cat_games = {
+        "Snake", "Tetris", "Breakout", "Pong", "Flappy", "Invaders", "Minesweeper", 
+        "Dino", "Cube3D", "Dice", "Coin", "Matrix", "2048", "Racing", "Gomoku"
+    };
+    std::vector<std::string> cat_tools = {
+        "Timer", "Stopwatch", "Flashlight", "Ruler", "Sketch", "Piano", "Drum", 
+        "Breathing", "MusicBox", "SciCalc", "StringIR", "LoRaChat", "GPS", "Distance", "Temp/Humi+"
+    };
+    std::vector<std::string> cat_system = {
+        "SysInfo", "SetWiFi", "Clock", "Keyboard", "IMU", "SDCard", "REPL", 
+        "Scan", "Record", "Chat", "Remote", "Terminal"
+    };
+
+    // Classify Apps
+    auto installed_apps = GetMooncake().getAppAbilityManager()->getAllAbilityInstance();
+    for (auto& app_raw : installed_apps) {
+        auto app = static_cast<AppAbility*>(app_raw);
+        if (app->getId() == launcherAppId) continue;
+        
+        std::string name = app->getAppInfo().name;
+        int id = app->getId();
+        
+        bool found = false;
+        
+        // Check Games
+        for(auto& n : cat_games) if(n == name) {
+            _folders[0].appIds.push_back(id);
+            found = true; break;
+        }
+        if(found) continue;
+
+        // Check Tools
+        for(auto& n : cat_tools) if(n == name) {
+            _folders[1].appIds.push_back(id);
+            found = true; break;
+        }
+        if(found) continue;
+
+        // Check System
+        for(auto& n : cat_system) if(n == name) {
+            _folders[2].appIds.push_back(id);
+            found = true; break;
+        }
+        if(found) continue;
+        
+        // Others -> Root
+        _root_apps.push_back(id);
+    }
+    
+    // Initial State: Root
+    _in_folder = false;
+    _current_folder_index = -1;
+    updateMenuItems();
+
+    // Setup animation
+    getSelectorPostion().x.springOptions().visualDuration = 0.4;
+    getSelectorShape().x.springOptions().visualDuration   = 0.4;
+    getSelectorShape().y.springOptions().visualDuration   = 0.4;
+
+    // Default app number
+    moveTo(1);
+
+    // Read input in every update
+    setConfig().readInputInterval = 0;
+    
+    initStars();
+}
+
+void LauncherMenu::updateMenuItems() {
+    _data.option_list.clear();
+    _current_menu_items.clear();
+    
+    int i = 0;
+    
+    // If in folder, add Back button
+    if (_in_folder) {
+        MenuItem item;
+        item.name = "BACK";
+        item.isFolder = false;
+        item.id = -999; // Special ID for Back
+        _current_menu_items.push_back(item);
+        
+        addOption({Vector4i{ICON_GAP + i * (ICON_WIDTH + ICON_GAP), ICON_MARGIN_TOP, ICON_WIDTH, ICON_WIDTH}, nullptr});
+        i++;
+        
+        // Add apps in folder
+        if (_current_folder_index >= 0 && _current_folder_index < _folders.size()) {
+            for (int appId : _folders[_current_folder_index].appIds) {
+                auto app = static_cast<AppAbility*>(GetMooncake().getAppAbilityManager()->getAbilityInstance(appId));
+                if (app) {
+                    MenuItem item;
+                    item.name = app->getAppInfo().name;
+                    item.isFolder = false;
+                    item.id = appId;
+                    _current_menu_items.push_back(item);
+                    
+                    void* icon = get_icon_for_app(item.name, app->getAppInfo().userData);
+                    addOption({Vector4i{ICON_GAP + i * (ICON_WIDTH + ICON_GAP), ICON_MARGIN_TOP, ICON_WIDTH, ICON_WIDTH}, icon});
+                    i++;
+                }
+            }
+        }
+    } else {
+        // Root: Show Folders first
+        for (int f=0; f<_folders.size(); f++) {
+            if (_folders[f].appIds.empty()) continue; // Skip empty folders
+            
+            MenuItem item;
+            item.name = _folders[f].name;
+            item.isFolder = true;
+            item.id = f; // Folder index
+            _current_menu_items.push_back(item);
+            
+            // Use generic icon for folders for now
+            addOption({Vector4i{ICON_GAP + i * (ICON_WIDTH + ICON_GAP), ICON_MARGIN_TOP, ICON_WIDTH, ICON_WIDTH}, &icon_generic});
+            i++;
+        }
+        
+        // Then Root Apps
+        for (int appId : _root_apps) {
+            auto app = static_cast<AppAbility*>(GetMooncake().getAppAbilityManager()->getAbilityInstance(appId));
+            if (app) {
+                MenuItem item;
+                item.name = app->getAppInfo().name;
+                item.isFolder = false;
+                item.id = appId;
+                _current_menu_items.push_back(item);
+                
+                void* icon = get_icon_for_app(item.name, app->getAppInfo().userData);
+                addOption({Vector4i{ICON_GAP + i * (ICON_WIDTH + ICON_GAP), ICON_MARGIN_TOP, ICON_WIDTH, ICON_WIDTH}, icon});
+                i++;
+            }
+        }
+    }
+}
+
+void LauncherMenu::initStars() {
+    _stars.clear();
+    for (int i = 0; i < 30; i++) {
+        Star s;
+        s.x = rand() % 240;
+        s.y = rand() % 135;
+        s.speed = (rand() % 10 + 2) / 10.0f;
+        s.brightness = (rand() % 100) / 100.0f;
+        _stars.push_back(s);
+    }
+}
+
+void LauncherMenu::renderBackground() {
+    // 1. Deep Space Gradient (Banded for performance)
+    // Top is black, bottom is dark purple
+    for (int y = 0; y < 135; y += 5) {
+        uint8_t r = 20 + (y * 40 / 135);
+        uint8_t g = 0 + (y * 10 / 135);
+        uint8_t b = 40 + (y * 80 / 135);
+        uint16_t color = GetHAL().canvas.color565(r, g, b);
+        GetHAL().canvas.fillRect(0, y, 240, 5, color);
+    }
+    
+    // 2. Stars
+    for (auto& s : _stars) {
+        // Move star
+        s.x -= s.speed;
+        if (s.x < 0) s.x = 240;
+        
+        // Twinkle
+        if (rand() % 20 == 0) s.brightness = (rand() % 100) / 100.0f;
+        
+        uint8_t c = (uint8_t)(s.brightness * 255);
+        GetHAL().canvas.drawPixel((int)s.x, (int)s.y, GetHAL().canvas.color565(c, c, c));
+    }
+    
+    // 3. Grid Floor (Cyberpunk style)
+    // Perspective lines
+    int horizon_y = 100;
+    GetHAL().canvas.drawFastHLine(0, horizon_y, 240, TFT_MAGENTA);
+    
+    // Vertical lines spreading out
+    // Vanishing point approx (120, 60)
+    for (int x = -200; x < 440; x += 40) {
+        GetHAL().canvas.drawLine(120, 60, x, 135, 0x6010); // Dark Magenta
+    }
+    
+    // Moving horizontal lines
+    _anim_time += 0.5f;
+    if (_anim_time > 20) _anim_time = 0;
+    
+    for (int y = horizon_y; y < 135; y += (10 + (y-horizon_y)/2)) {
+        int draw_y = y + (int)_anim_time % 10;
+        if (draw_y < 135)
+            GetHAL().canvas.drawFastHLine(0, draw_y, 240, 0x6010);
+    }
+}
+
+void LauncherMenu::onReadInput()
+{
+    auto event = GetHAL().keyboard.getLatestKeyEventRaw();
+    
+    if (_waiting_for_release) {
+        if (!event.state) {
+            _waiting_for_release = false;
+        }
+        return;
+    }
+
+    // Key pressed
+    if (event.state == true) {
+        // Left
+        if (event.row == 3 && event.col == 10) {
+            goLast();
+        }
+        // Right
+        else if (event.row == 3 && event.col == 12) {
+            goNext();
+        }
+        // Up
+        else if (event.row == 2 && event.col == 11) {
+            goLast();
+        }
+        // Down
+        else if (event.row == 3 && event.col == 11) {
+            goNext();
+        }
+        // Enter
+        else if (event.row == 2 && event.col == 13) {
+            press(getSelectedKeyframe());
+        }
+        // Mute (Key M: Row 3, Col 9)
+        // M key for Mute
+        auto key = GetHAL().keyboard.getLatestKeyEvent();
+        if (key.state && key.keyCode == KEY_M) {
+             if (onMuteToggle) onMuteToggle();
+             GetHAL().delay(200); // Debounce
+        }
+    }
+    // Key released
+    else {
+        // Enter
+        if (event.row == 2 && event.col == 13) {
+            release();
+        }
+    }
+}
+
+void LauncherMenu::onClick()
+{
+    int index = getSelectedOptionIndex();
+    if (index < 0 || index >= _current_menu_items.size()) return;
+    
+    const auto& item = _current_menu_items[index];
+    
+    if (item.isFolder) {
+        // Enter Folder
+        _in_folder = true;
+        _current_folder_index = item.id;
+        updateMenuItems();
+        moveTo(0);
+    } 
+    else if (item.id == -999) {
+        // Back
+        _in_folder = false;
+        _current_folder_index = -1;
+        updateMenuItems();
+        moveTo(0);
+    }
+    else {
+        // Open App
+        if (onAppOpen) {
+            onAppOpen(index, item.id);
+        }
+    }
+}
+
+void LauncherMenu::onRender()
+{
+    auto selector_kf = getSelectorCurrentFrame();
+
+    // Clear & Background
+    renderBackground();
+
+    // X offset (keep selector ar the center)
+    int x_offset = -(selector_kf.x) + GetHAL().canvas.width() / 2 - ICON_WIDTH / 2;
+
+    // Font
+    GetHAL().canvas.setFont(FONT_BASIC);
+    GetHAL().canvas.setTextSize(1);
+    
+    // Levitation effect for selected
+    float float_y = sin(GetHAL().millis() / 200.0f) * 3.0f;
+
+    // Redner options
+    int index = 0;
+    for (auto& i : getOptionList()) {
+        // Safety check
+        if (index >= _current_menu_items.size()) break;
+        std::string name = _current_menu_items[index].name;
+        
+        if (index == getSelectedOptionIndex()) {
+            
+            int center_x = i.keyframe.x + i.keyframe.width / 2 + x_offset;
+            int center_y = i.keyframe.y + i.keyframe.height / 2 + (int)float_y;
+            
+            // Glow effect (Concentric rounded rects)
+            for (int r = 0; r < 5; r++) {
+                uint16_t glow_color = GetHAL().canvas.color565(100 - r*20, 255 - r*40, 255);
+                GetHAL().canvas.drawRoundRect(
+                    center_x - ICON_SELECTED_WIDTH/2 - r,
+                    center_y - ICON_SELECTED_WIDTH/2 - r,
+                    ICON_SELECTED_WIDTH + r*2,
+                    ICON_SELECTED_WIDTH + r*2,
+                    10 + r,
+                    glow_color
+                );
+            }
+            
+            // Shadow
+            GetHAL().canvas.fillEllipse(center_x, center_y + 40, 20 + (int)float_y, 4, TFT_BLACK);
+
+            // Icon bg
+            GetHAL().canvas.fillSmoothRoundRect(
+                center_x - ICON_SELECTED_WIDTH/2,
+                center_y - ICON_SELECTED_WIDTH/2,
+                ICON_SELECTED_WIDTH, ICON_SELECTED_WIDTH, 8, TFT_WHITE); // White highlight
+
+            // Icon
+            if (i.userData != nullptr) {
+                AppIcon_t* icon = (AppIcon_t*)(i.userData);
+                bool is_generated = (icon->iconBig == icon->iconSmall);
+                
+                if (is_generated) {
+                    // Draw 40x40 centered
+                    GetHAL().canvas.pushImage(
+                        center_x - 20, // 40/2
+                        center_y - 20, 
+                        40, 40,
+                        icon->iconBig);
+                } else {
+                    // Legacy behavior (56x56)
+                    GetHAL().canvas.pushImage(
+                        center_x - ICON_SELECTED_WIDTH/2 + 4,
+                        center_y - ICON_SELECTED_WIDTH/2 + 4, 
+                        56, 56,
+                        icon->iconBig);
+                }
+            }
+
+            // Draw name (Pulsing color)
+            GetHAL().canvas.setTextColor(TFT_YELLOW, TFT_BLACK);
+            // Draw background for text to make it readable
+            int text_w = GetHAL().canvas.textWidth(name.c_str());
+            GetHAL().canvas.fillRect(
+                center_x - text_w/2 - 2, 
+                center_y + ICON_SELECTED_WIDTH/2 + ICON_TAG_MARGIN_TOP - 2,
+                text_w + 4, 12, TFT_BLACK);
+                
+            GetHAL().canvas.drawCenterString(
+                name.c_str(), 
+                center_x,
+                center_y + ICON_SELECTED_WIDTH/2 + ICON_TAG_MARGIN_TOP);
+                
+        } else {
+            // Unselected items - Darker, Smaller
+            int item_x = i.keyframe.x + x_offset;
+            int item_y = i.keyframe.y;
+            
+            // Icon bg (Darker)
+            GetHAL().canvas.fillSmoothRoundRect(item_x, item_y, i.keyframe.width,
+                                                i.keyframe.height, 8, 0x3186); // Dark Grey/Blue
+
+            // Icon
+            if (i.userData != nullptr) {
+                AppIcon_t* icon = (AppIcon_t*)(i.userData);
+                if (icon->iconSmall != nullptr) {
+                    GetHAL().canvas.pushImage(item_x + 4, item_y + 4, 40, 40,
+                                              icon->iconSmall);
+                }
+            }
+
+            // Draw tag
+            GetHAL().canvas.setTextColor(TFT_LIGHTGREY, 0x0000); // Transparent bg? 0x0000 is usually black
+            GetHAL().canvas.drawCenterString(name.c_str(),
+                                             item_x + i.keyframe.width / 2,
+                                             item_y + i.keyframe.height + ICON_TAG_MARGIN_TOP);
+        }
+
+        index++;
+    }
+
+    if (pushCanvas) {
+        GetHAL().pushCanvas();
+    }
+}
+```
+
+请详细审查这段菜单视图代码，指出所有可能的问题、bug 和优化建议。
+[SEND]

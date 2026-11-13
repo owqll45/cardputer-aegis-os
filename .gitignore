@@ -1,0 +1,38 @@
+# 构建产物（资源里的 .bin/.dat 不能误伤，所以只按目录排除）
+build/
+build_*/
+build_temp/
+managed_components/
+
+# 本地环境与非固件工程
+.venv/
+.cache/
+__pycache__/
+android_project/
+KernelSU-Style-UI-Kit/
+新建文件夹/
+main_backup*/
+
+# 日志与采集输出
+logs/
+*.log
+
+# 备份 / 导出 / 临时
+awa_backup/
+firmware_dump/
+temp_apk/
+.screenshots/
+
+# 本地环境
+.venv/
+.gradle/
+gradle/
+.reasonix/
+
+# 与本固件无关的大型目录（需要时再单独纳入）
+app/
+data/
+local_ai_cluster/
+persistence/
+esp32_driver/
+meshtastic_src/
