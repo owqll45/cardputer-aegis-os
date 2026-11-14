@@ -30,6 +30,7 @@
 #include "esp_now.h"
 #include "display.h"
 #include "monitor.h"
+#include "mirror.h"
 #include "esp_event.h"
 #include "esp_netif.h"
 #include "nvs_flash.h"
@@ -951,6 +952,7 @@ static void on_recv(const esp_now_recv_info_t *info, const uint8_t *data, int le
     if (len >= 6 && data[0] == 'G' && data[1] == 'M') {
         monitor_on_frame(info->src_addr, data, len,
                          info->rx_ctrl ? (int)info->rx_ctrl->rssi : -120);
+        mirror_on_frame(data, len);          /* 兜底转发（仅在监视器请求时发） */
         return;
     }
 
@@ -1841,6 +1843,7 @@ void app_main(void)
     ui_flush();
 
     lora_init(s_my_id);        /* 常驻 LoRa 接收 + NodeInfo 广播（独立任务） */
+    mirror_init();             /* GMK 镜像兜底：监视器请求时经 LoRa 转发状态帧 */
 
     {   /* 官方 Meshtastic App 的 BLE 接口 */
         char bln[24], bsn[12];
@@ -1859,6 +1862,7 @@ void app_main(void)
         int t = now_ms();
 
         lora_drain();          /* 只在主任务里改消息表/节点表 */
+        mirror_tick(t);        /* 镜像兜底：文本/时间空闲时才发 */
 
 #if LORA_UI_SELFTEST
         /* 自检：注入三档 GPS 状态的节点，切到节点页打印帧缓冲，验证“橙/红/灰”配色 */

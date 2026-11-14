@@ -55,6 +55,7 @@
 #define PORT_TEXT    1
 #define PORT_NODE    4
 #define PORT_TIME    0x0101      /* 自定义私有 portnum：ZD 时间广播（Meshtastic 侧按未知 port 忽略） */
+#define PORT_MIRROR  0x0102      /* 私有：GMK 状态镜像兜底（仅监视器固件解析） */
 
 /* GPS 能力上报（写进 NodeInfo.User 私有字段 15）：
  * 1=本机无 GPS 硬件（对端显示橙色），2=有 GPS（红色），0/缺省=未知。
@@ -125,7 +126,7 @@ static void llog(const char *fmt, ...)
 
 /* 调试开关：1 = 打印收到的原始帧前 40 字节（定位 SPI 读通路位翻转） */
 #define LRX_HEXLOG 0
-static void dbg_hex(const char *tag, const uint8_t *d, int n)
+__attribute__((unused)) static void dbg_hex(const char *tag, const uint8_t *d, int n)
 {
     char b[160];
     int p = snprintf(b, sizeof(b), "%s[%d]", tag, n);
@@ -150,13 +151,17 @@ typedef struct {
     uint32_t to;
     uint16_t len;
     uint16_t tag;           /* 原样回传在 LORA_EVT_TXDONE，0=不关心 */
-    uint8_t  kind;          /* 0=文本 1=时间广播 */
+    uint8_t  kind;          /* 0=文本 1=时间广播 2=GMK 镜像 */
     uint32_t utc;           /* kind=1: UTC 秒 */
     uint8_t  tsrc;          /* kind=1: 0=未同步 1=GPS 2=手动 */
     char     text[80];
+    uint8_t  raw[160];      /* kind=2: 镜像 payload */
 } lora_txreq_t;
 static QueueHandle_t s_txq;
+static QueueHandle_t s_mirq;      /* 镜像单槽：永远不排队，最多一帧在等 */
 static QueueHandle_t s_q;
+/* 1=正在空口发射：镜像帧据此让路，保证文本/时间不被插队 */
+static volatile int s_tx_busy;
 
 static void tx_id_add(uint32_t id);
 static int  tx_id_recent(uint32_t id);
@@ -194,8 +199,8 @@ static void xfer(const uint8_t *tx, uint8_t *rx, int n)
 
 static int cmd(uint8_t op, const uint8_t *p, int n)
 {
-    uint8_t tx[1 + 96] = {0}, rx[1 + 96] = {0};
-    if (n > 96) return -100;
+    uint8_t tx[1 + 160] = {0}, rx[1 + 160] = {0};
+    if (n > 160) return -100;
     if (wait_busy_low(100) < 0) return -1;
     tx[0] = op;
     if (n > 0) memcpy(tx + 1, p, (size_t)n);
@@ -366,12 +371,13 @@ static void set_tx_power(int dbm)
     cmd(0x8E, txp, 2);
 }
 
+/* SX1268 单包上限 255B；这里放到 160B，够镜像分块用（原 64B 会逼出 7 块全量） */
 static void write_payload(const uint8_t *d, int n)
 {
     uint8_t base[2] = {0x00, 0x00};
     cmd(0x8F, base, 2);
-    uint8_t wb[1 + 64];
-    if (n > 64) n = 64;
+    uint8_t wb[1 + 160];
+    if (n > 160) n = 160;
     wb[0] = 0x00;
     memcpy(wb + 1, d, (size_t)n);
     cmd(0x0E, wb, 1 + n);
@@ -583,6 +589,45 @@ static int tx_time(uint32_t utc, uint8_t src)
     LLOGI("LTX TIME utc=%lu src=%u len=%d dbm=%d %s air=%dms", (unsigned long)utc, src, n,
           s_tx_dbm, ok ? "DONE" : "TIMEOUT", s_tx_ms);
     if (ok) tx_id_add(id);
+    return ok;
+}
+
+/* GMK 镜像兜底：portnum=PORT_MIRROR，payload 由 mirror.c 组织（差分/分块）。
+ * 只发一次不重试：镜像帧是可丢的，重试会挤掉文本/时间。 */
+static int tx_mirror(const uint8_t *pay, int plen)
+{
+    if (!s_tx_ok) return 0;
+    uint8_t data[200], frame[232];
+    int dn = 0;
+    dn += pb_u32(data + dn, 1, PORT_MIRROR);
+    dn += pb_bytes(data + dn, 2, pay, plen);
+    uint32_t id = (uint32_t)(esp_timer_get_time() / 1000) ^ (uint32_t)esp_random();
+    if (!id) id = 1;
+    aesctr(g_node, id, data, dn);
+
+    put32le(frame, 0xFFFFFFFFu);
+    put32le(frame + 4, g_node);
+    put32le(frame + 8, id);
+    frame[12] = 0xE7;
+    frame[13] = CH_HASH;
+    frame[14] = 0x00;
+    frame[15] = 0x00;
+    memcpy(frame + 16, data, (size_t)dn);
+    int n = 16 + dn;
+
+    radio_setup(s_tcxo_v);
+    set_sync_word();
+    s_poll_ms = 15000;
+    s_min_air = (int)((kPreset[s_preset].ms_per_byte * n + 900) * 0.75);
+    set_tx_power(s_tx_dbm);
+    write_payload(frame, n);
+    set_packet_params((uint8_t)n);
+    uint16_t irq = 0, err = 0;
+    int ok = tx_wait_done(&irq, &err);
+    static int n_log;
+    if (ok && (n_log < 12 || (n_log % 20) == 0))
+        LLOGI("LTX MIRROR len=%dB air=%dms dbm=%d", n, s_tx_ms, s_tx_dbm);
+    if (ok) n_log++;
     return ok;
 }
 
@@ -1012,10 +1057,21 @@ static void lora_task(void *arg)
         rx_poll();
 
         lora_txreq_t req;
+        int have = 0;
+        /* 文本/时间优先：先清空主队列，只有主队列真的空了才发镜像 */
         if (s_txq && xQueueReceive(s_txq, &req, 0) == pdTRUE) {
+            have = 1;
+        } else if (s_mirq && xQueueReceive(s_mirq, &req, 0) == pdTRUE) {
+            have = 1;
+        }
+        if (have) {
             int ok;
+            s_tx_busy = 1;
             if (req.kind == 1) {
                 ok = tx_time(req.utc, req.tsrc);
+                rx_start();
+            } else if (req.kind == 2) {
+                ok = tx_mirror(req.raw, req.len);
                 rx_start();
             } else {
                 ok = tx_text(req.to, req.text, req.len);
@@ -1027,6 +1083,7 @@ static void lora_task(void *arg)
                 te.pkt_lo = req.tag;
                 push_evt(&te);
             }
+            s_tx_busy = 0;
         }
 
         int64_t now = esp_timer_get_time();
@@ -1084,6 +1141,7 @@ void lora_init(uint32_t my_node)
 
     s_q = xQueueCreate(8, sizeof(lora_evt_t));
     s_txq = xQueueCreate(4, sizeof(lora_txreq_t));
+    s_mirq = xQueueCreate(1, sizeof(lora_txreq_t));
 
     spi_device_interface_config_t dev;
     memset(&dev, 0, sizeof(dev));
@@ -1097,7 +1155,7 @@ void lora_init(uint32_t my_node)
         return;
     }
 
-    xTaskCreate(lora_task, "lora", 4096, NULL, 4, NULL);
+    xTaskCreate(lora_task, "lora", 6144, NULL, 4, NULL);
 }
 
 bool lora_evt_pop(lora_evt_t *out)
@@ -1136,6 +1194,29 @@ int lora_send_text_tagged(uint32_t to, const char *text, uint16_t tag)
     memcpy(r.text, text, n);
     if (xQueueSend(s_txq, &r, 0) != pdTRUE) return -2;
     return 0;
+}
+
+int lora_send_mirror(const uint8_t *pay, int n)
+{
+    if (!s_tx_ok) return -1;
+    if (!s_mirq || !pay || n <= 0 || n > (int)sizeof(((lora_txreq_t *)0)->raw)) return -1;
+    if (s_tx_busy) return -2;
+    if (uxQueueMessagesWaiting(s_txq) != 0) return -2;   /* 文本/时间优先 */
+    lora_txreq_t r;
+    memset(&r, 0, sizeof(r));
+    r.kind = 2;
+    r.len = (uint16_t)n;
+    memcpy(r.raw, pay, (size_t)n);
+    if (xQueueOverwrite(s_mirq, &r) != pdTRUE) return -2;
+    return 0;
+}
+
+int lora_tx_idle(void)
+{
+    if (s_tx_busy) return 0;
+    if (s_txq && uxQueueMessagesWaiting(s_txq)) return 0;
+    if (s_mirq && uxQueueMessagesWaiting(s_mirq)) return 0;
+    return 1;
 }
 
 int lora_send_time(uint32_t utc, uint8_t src)

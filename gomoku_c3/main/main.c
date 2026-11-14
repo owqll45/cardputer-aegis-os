@@ -29,6 +29,10 @@
 #include "esp_adc/adc_cali_scheme.h"
 #include "u8g2font.h"
 #include "xbox_ble.h"
+// ---- 模块化叠加：外壳/模块/事件总线（基座原有逻辑不变） ----
+#include "ui.h"
+#include "bus.h"
+#include "module.h"
 
 static const char* TAG = "mon";
 
@@ -107,9 +111,15 @@ static const uint16_t kPal[256] = {
 
 static inline uint16_t sw(uint16_t c) { return (uint16_t)((c >> 8) | (c << 8)); }
 
+/* LCD 与 LoRa 共用 SPI2。LoRa 侧用 spi_device_acquire_bus() 包住整个 CS 窗口；
+ * 基座推屏也必须持同一把总线锁，否则 LoRa 事务会插进 LCD 的 CS 低位窗口导致花屏。
+ * s_lcd_bus_held 让 push_screen 内部的多次 lcd_write 只加锁一次。 */
+static int s_lcd_bus_held = 0;
 static void lcd_write(const uint8_t* data, size_t len, int is_data)
 {
     if (len == 0) return;
+    int own = !s_lcd_bus_held;
+    if (own) spi_device_acquire_bus(s_spi, portMAX_DELAY);
     gpio_set_level(PIN_DC, is_data ? 1 : 0);
     gpio_set_level(PIN_CS, 0);
     spi_transaction_t t;
@@ -118,6 +128,7 @@ static void lcd_write(const uint8_t* data, size_t len, int is_data)
     t.tx_buffer = data;
     spi_device_polling_transmit(s_spi, &t);
     gpio_set_level(PIN_CS, 1);
+    if (own) spi_device_release_bus(s_spi);
 }
 static void lcd_cmd(uint8_t cmd) { lcd_write(&cmd, 1, 0); }
 static void lcd_data1(uint8_t d) { lcd_write(&d, 1, 1); }
@@ -268,6 +279,9 @@ static void push_screen(void)
     extern uint32_t g_push_cnt;
     extern uint32_t g_push_err;
     g_push_cnt++;
+    /* 整个刷屏窗口持总线：期间 LoRa 的 xfer() 只能在 acquire_bus 上等 */
+    spi_device_acquire_bus(s_spi, portMAX_DELAY);
+    s_lcd_bus_held = 1;
     lcd_set_window(0, 0, LCD_W - 1, LCD_H - 1);
     gpio_set_level(PIN_DC, 1);
     gpio_set_level(PIN_CS, 0);
@@ -282,7 +296,127 @@ static void push_screen(void)
         if (e != ESP_OK) g_push_err++;
     }
     gpio_set_level(PIN_CS, 1);
+    s_lcd_bus_held = 0;
+    spi_device_release_bus(s_spi);
 }
+
+// ================= 模块外壳绘图 API (仅供 main/mod_*.c 调用) =================
+// 只是一层带裁剪的薄封装，基座原有渲染路径完全不经过这里。
+static int s_ui_x0 = 0, s_ui_y0 = 0, s_ui_x1 = LCD_W, s_ui_y1 = LCD_H;
+
+void ui_clip(int x, int y, int w, int h)
+{
+    s_ui_x0 = x;
+    s_ui_y0 = y;
+    s_ui_x1 = x + w;
+    s_ui_y1 = y + h;
+    if (s_ui_x0 < 0) s_ui_x0 = 0;
+    if (s_ui_y0 < 0) s_ui_y0 = 0;
+    if (s_ui_x1 > LCD_W) s_ui_x1 = LCD_W;
+    if (s_ui_y1 > LCD_H) s_ui_y1 = LCD_H;
+}
+
+void ui_clip_reset(void) { ui_clip(0, 0, LCD_W, LCD_H); }
+
+void ui_clear(ui_color_t c)
+{
+    ui_clip_reset();
+    fb_fill(0, 0, LCD_W, LCD_H, c);
+}
+
+void ui_px(int x, int y, ui_color_t c)
+{
+    if (x < s_ui_x0 || x >= s_ui_x1 || y < s_ui_y0 || y >= s_ui_y1) return;
+    fb_px(x, y, c);
+}
+
+void ui_fill(int x, int y, int w, int h, ui_color_t c)
+{
+    int x1 = x + w, y1 = y + h;
+    if (x < s_ui_x0) x = s_ui_x0;
+    if (y < s_ui_y0) y = s_ui_y0;
+    if (x1 > s_ui_x1) x1 = s_ui_x1;
+    if (y1 > s_ui_y1) y1 = s_ui_y1;
+    if (x1 <= x || y1 <= y) return;
+    fb_fill(x, y, x1 - x, y1 - y, c);
+}
+
+void ui_hline(int x, int y, int n, ui_color_t c) { ui_fill(x, y, n, 1, c); }
+void ui_vline(int x, int y, int n, ui_color_t c) { ui_fill(x, y, 1, n, c); }
+
+void ui_rect(int x, int y, int w, int h, ui_color_t c)
+{
+    ui_hline(x, y, w, c);
+    ui_hline(x, y + h - 1, w, c);
+    ui_vline(x, y, h, c);
+    ui_vline(x + w - 1, y, h, c);
+}
+
+void ui_line(int x0, int y0, int x1, int y1, ui_color_t c)
+{
+    int dx = abs(x1 - x0), sx = x0 < x1 ? 1 : -1;
+    int dy = -abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
+    int err = dx + dy;
+    while (1) {
+        ui_px(x0, y0, c);
+        if (x0 == x1 && y0 == y1) break;
+        int e2 = 2 * err;
+        if (e2 >= dy) { err += dy; x0 += sx; }
+        if (e2 <= dx) { err += dx; y0 += sy; }
+    }
+}
+
+void ui_disc(int cx, int cy, int r, ui_color_t c)
+{
+    for (int dy = -r; dy <= r; dy++) {
+        int dx = (int)sqrtf((float)(r * r - dy * dy));
+        ui_hline(cx - dx, cy + dy, 2 * dx + 1, c);
+    }
+}
+
+// 带裁剪的单字绘制（基座 fb_glyph 无裁剪，这里单独实现，不改基座）
+static int ui_glyph(const uint8_t* font, int x, int ytop, uint32_t cp, ui_color_t fg)
+{
+    u8g2_glyph_t g;
+    if (u8g2_decode(font, cp, &g, s_gbuf) != 0) return 0;
+    if (g.w > 20 || g.h > 20) return g.xadv;
+    int base = u8g2_font_baseline(font);
+    int gx = x + g.xoff;
+    int gy = ytop + base - g.yoff - g.h;
+    for (int j = 0; j < g.h; j++)
+        for (int i = 0; i < g.w; i++)
+            if (s_gbuf[j * g.w + i]) ui_px(gx + i, gy + j, fg);
+    return g.xadv;
+}
+
+int ui_text(const uint8_t* font, int x, int y, const char* s, ui_color_t c)
+{
+    if (!s) return x;
+    while (*s) {
+        uint32_t cp = u8g2_utf8_next(&s);
+        if (x >= s_ui_x1) break;
+        int adv = ui_glyph(font, x, y, cp, c);
+        if (adv <= 0) break; // 缺字：避免死循环
+        x += adv;
+    }
+    return x;
+}
+
+void ui_text_cx(const uint8_t* font, int x0, int w, int y, const char* s, ui_color_t c)
+{
+    if (!s) return;
+    int tw = u8g2_str_width(font, s);
+    int x = x0 + (w - tw) / 2;
+    if (x < x0) x = x0;
+    ui_text(font, x, y, s, c);
+}
+
+int ui_text_w(const uint8_t* font, const char* s)
+{
+    return s ? u8g2_str_width(font, s) : 0;
+}
+
+void ui_push(void) { push_screen(); }
 
 // ================= 电量 ADC 自动探测 =================
 static uint32_t now_ms(void);
@@ -552,8 +686,11 @@ static uint32_t s_anim_ms = 0;      // 胜利动画本地计时起点
 static uint32_t s_last_render = 0;
 
 static uint8_t s_host[6];
+static const uint8_t s_bcast[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 static volatile int s_linked = 0;
 static uint32_t s_last_pkt_ms = 0;
+static uint32_t s_espnow_ms = 0;      /* 最后一次 ESP-NOW 收包（不含 LoRa 兜底） */
+static uint32_t s_lora_ms = 0;        /* 最后一次 LoRa 兜底帧（窗口放宽到 6s，避免换帧间隙闪屏） */
 static uint32_t s_hello_last = 0;
 
 // ---- 多游戏镜像: 当前 app / 游戏画面切换(GMKAPP 0x10) ----
@@ -1017,56 +1154,10 @@ static void parse_race(const uint8_t* d);
 static void parse_fps(const uint8_t* d);
 static void parse_shogi(const uint8_t* d);
 
-static void on_recv(const esp_now_recv_info_t* info, const uint8_t* d, int len)
+/* GMK 应用/状态帧 -> 本地镜像状态。
+ * ESP-NOW 主链路与 LoRa 兜底（mod_mirror）都走这里，解析/渲染只有一份。 */
+static void gmk_apply(const uint8_t* d, int len)
 {
-    s_last_pkt_ms = now_ms();
-    // 信号强度: 取对端发来的 GMK 包
-    if (info && info->rx_ctrl && len >= 3 && memcmp(d, "GMK", 3) == 0)
-        s_rssi = info->rx_ctrl->rssi;
-    {
-        static uint32_t n_beac = 0, n_welc = 0, n_state = 0, n_other = 0;
-        if (len == 13 && memcmp(d, "GMKBEAC", 7) == 0) n_beac++;
-        else if (len == 7 && memcmp(d, "GMKWELC", 7) == 0) n_welc++;
-        else if (len == GMK_STATE_LEN) n_state++;
-        else n_other++;
-        static uint32_t last_log = 0;
-        if (now_ms() - last_log > 5000) {
-            last_log = now_ms();
-            ESP_LOGI(TAG, "rx beac=%u welc=%u state=%u other=%u lastlen=%d",
-                     (unsigned)n_beac, (unsigned)n_welc, (unsigned)n_state,
-                     (unsigned)n_other, len);
-        }
-    }
-    if (len == 13 && memcmp(d, "GMKBEAC", 7) == 0) {
-        // 主机端重启后会重新广播 GMKBEAC: 无论 s_linked 当前是 0 还是 1 都要回 GMKHI1
-        // (如果 s_linked=1 但主机重启了, 不回的话双方会假在线卡死)
-        memcpy(s_host, d + 7, 6);
-        add_peer(s_host);
-        // 主机重置了, 所有之前游戏的 *_have 标记全部清掉
-        s_have_state = 0; s_pong_have = 0; s_reversi_have = 0;
-        s_tank_have = 0; s_uno_have = 0; s_c4_have = 0; s_ck_have = 0;
-        s2048_have = 0; s_tetris_have = 0; s_snake_have = 0; s_breakout_have = 0;
-        s_ms_have = 0; s_flappy_have = 0; s_inv_have = 0; s_race_have = 0;
-        s_fps_have = 0; s_shogi_have = 0;
-        if (now_ms() - s_hello_last > 800) {
-            s_hello_last = now_ms();
-            esp_now_send(s_host, (const uint8_t*)"GMKHI1", 6);
-        }
-        return;
-    }
-    if (len == 7 && memcmp(d, "GMKWELC", 7) == 0) {
-        if (!s_linked) {
-            memcpy(s_host, info->src_addr, 6);
-            add_peer(s_host);
-            s_linked = 1;
-            ESP_LOGI(TAG, "linked");
-        }
-        return;
-    }
-    if (len == 6 && memcmp(d, "GMKBYE", 6) == 0) {
-        s_linked = 0;
-        return;
-    }
     if (len == 24 && d[0] == 'G' && d[1] == 'M' && d[2] == 0x10) {
         // GMKAPP: 前台 app 切换(名字+游戏id+图标id)
         // 主机心跳每 1 秒重发一次 GMKAPP (L224-228 glink.cpp), 但我们只在 game_id 真变了时才清 *_have.
@@ -1126,6 +1217,60 @@ static void on_recv(const esp_now_recv_info_t* info, const uint8_t* d, int len)
     if (len == GMK_STATE_LEN && d[0] == 'G' && d[1] == 'M' && d[2] == 0x20) {
         parse_state(d);
     }
+}
+
+static void on_recv(const esp_now_recv_info_t* info, const uint8_t* d, int len)
+{
+    s_espnow_ms = now_ms();
+    s_last_pkt_ms = now_ms();
+    // 信号强度: 取对端发来的 GMK 包
+    if (info && info->rx_ctrl && len >= 3 && memcmp(d, "GMK", 3) == 0)
+        s_rssi = info->rx_ctrl->rssi;
+    {
+        static uint32_t n_beac = 0, n_welc = 0, n_state = 0, n_other = 0;
+        if (len == 13 && memcmp(d, "GMKBEAC", 7) == 0) n_beac++;
+        else if (len == 7 && memcmp(d, "GMKWELC", 7) == 0) n_welc++;
+        else if (len == GMK_STATE_LEN) n_state++;
+        else n_other++;
+        static uint32_t last_log = 0;
+        if (now_ms() - last_log > 5000) {
+            last_log = now_ms();
+            ESP_LOGI(TAG, "rx beac=%u welc=%u state=%u other=%u lastlen=%d",
+                     (unsigned)n_beac, (unsigned)n_welc, (unsigned)n_state,
+                     (unsigned)n_other, len);
+        }
+    }
+    if (len == 13 && memcmp(d, "GMKBEAC", 7) == 0) {
+        // 主机端重启后会重新广播 GMKBEAC: 无论 s_linked 当前是 0 还是 1 都要回 GMKHI1
+        // (如果 s_linked=1 但主机重启了, 不回的话双方会假在线卡死)
+        memcpy(s_host, d + 7, 6);
+        add_peer(s_host);
+        // 主机重置了, 所有之前游戏的 *_have 标记全部清掉
+        s_have_state = 0; s_pong_have = 0; s_reversi_have = 0;
+        s_tank_have = 0; s_uno_have = 0; s_c4_have = 0; s_ck_have = 0;
+        s2048_have = 0; s_tetris_have = 0; s_snake_have = 0; s_breakout_have = 0;
+        s_ms_have = 0; s_flappy_have = 0; s_inv_have = 0; s_race_have = 0;
+        s_fps_have = 0; s_shogi_have = 0;
+        if (now_ms() - s_hello_last > 800) {
+            s_hello_last = now_ms();
+            esp_now_send(s_host, (const uint8_t*)"GMKHI1", 6);
+        }
+        return;
+    }
+    if (len == 7 && memcmp(d, "GMKWELC", 7) == 0) {
+        if (!s_linked) {
+            memcpy(s_host, info->src_addr, 6);
+            add_peer(s_host);
+            s_linked = 1;
+            ESP_LOGI(TAG, "linked");
+        }
+        return;
+    }
+    if (len == 6 && memcmp(d, "GMKBYE", 6) == 0) {
+        s_linked = 0;
+        return;
+    }
+    gmk_apply(d, len);
 }
 
 // ===== 10 款新游戏 parse 函数 =====
@@ -1310,6 +1455,14 @@ static void wifi_espnow_init(void)
     esp_wifi_set_channel(GMK_CH, WIFI_SECOND_CHAN_NONE);
     esp_now_init();
     esp_now_register_recv_cb(on_recv);
+    {   /* 广播 peer：镜像兜底请求 GMKMON 要发给附近所有 C3 */
+        esp_now_peer_info_t pinfo;
+        memset(&pinfo, 0, sizeof(pinfo));
+        memcpy(pinfo.peer_addr, s_bcast, 6);
+        pinfo.channel = 0;
+        pinfo.encrypt = false;
+        esp_now_add_peer(&pinfo);
+    }
     uint8_t mac[6];
     esp_wifi_get_mac(WIFI_IF_STA, mac);
     ESP_LOGI(TAG, "C3 mac %02x:%02x:%02x:%02x:%02x:%02x", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
@@ -3234,6 +3387,78 @@ static void draw_status(void)
     push_screen();
 }
 
+// ================= 模块外壳: 渲染分流 =================
+// 最近 3s 内有可映射应用的帧 -> 基座原有 render_state()；
+// 无帧/超时/映射不了 -> 外壳页（左模块区 + 右栏 + 底部键义）。
+// 帧可以来自 ESP-NOW 主链路，也可以来自 LoRa 兜底（mod_mirror 喂进来），
+// 两者都更新 s_last_pkt_ms，所以切换时不闪屏、不跳画面。
+static int ui_frame_fresh(void)
+{
+    uint32_t now = now_ms();
+    if (!view_ready()) return 0;
+    if ((uint32_t)(now - s_last_pkt_ms) <= 3000) return 1;
+    /* LoRa 兜底：全量两块之间会有 ~3s 间隔，窗口放到 6s，屏幕不闪 */
+    return s_lora_ms && (uint32_t)(now - s_lora_ms) <= 6000;
+}
+
+static int ui_mirror_active(void)
+{
+    return module_mirror_wanted(now_ms(), ui_frame_fresh());
+}
+
+static char s_notice[48];
+
+void ui_set_notice(const char *text)
+{
+    if (!text) { s_notice[0] = 0; return; }
+    snprintf(s_notice, sizeof(s_notice), "%s", text);
+}
+
+int ui_espnow_alive(uint32_t now_ms)
+{
+    return (uint32_t)(now_ms - s_espnow_ms) <= 3000;
+}
+
+void ui_gmk_feed(const uint8_t *d, int len)
+{
+    if (!d || len < 6) return;
+    gmk_apply(d, len);
+    s_last_pkt_ms = now_ms();      /* 兜底帧也算“新鲜”，渲染分流自动留在镜像页 */
+    s_lora_ms = s_last_pkt_ms;
+    s_gs_ready = 1;
+}
+
+void ui_espnow_bcast(const void *data, int len)
+{
+    if (!data || len <= 0 || len > 250) return;
+    esp_now_send(s_bcast, (const uint8_t *)data, len);
+}
+
+static void draw_notice(void)
+{
+    fb_fill(0, 0, LCD_W, LCD_H, C_BLACK);
+    fb_text_cx(0, LCD_W, 74, "链路不支持镜像", F14, C_ORANGE);
+    fb_text_cx(0, LCD_W, 104, s_notice, F12, C_GRAY);
+    fb_text_cx(0, LCD_W, 134, "ESP-NOW 已断开，LoRa 兜底不适用", F10B, C_DGRAY);
+    fb_text_cx(0, LCD_W, 152, "动作类游戏需要低延迟连续画面", F10B, C_DGRAY);
+    push_screen();
+}
+
+static void ui_present(void)
+{
+    if (ui_mirror_active()) {
+        if (view_ready()) render_state();
+        else draw_status();
+    } else if (s_notice[0] && !module_shell_hold()) {
+        draw_notice();
+    } else {
+        module_shell_draw();
+    }
+}
+
+// 模块层（module.c）长按确认后立刻重画，避免多等一个 400ms 周期
+void ui_present_now(void) { ui_present(); }
+
 static void draw_settings(void)
 {
     fb_fill(0, 0, LCD_W, LCD_H, C_BLACK);
@@ -3266,6 +3491,14 @@ static void draw_settings(void)
     fb_text_cx(0, LCD_W, 222, "三击: 返回", F10B, C_DGRAY);
     toast_draw();
     push_screen();
+}
+
+// 外壳「设置」模块长按确认时走这里：打开的还是基座原有设置菜单
+void ui_open_settings(void)
+{
+    s_settings = 1;
+    s_sel = 0;
+    draw_settings();
 }
 
 // ---------------- 关于系统 ----------------
@@ -3316,8 +3549,7 @@ static void draw_about(void)
 static void leave_menu(void)
 {
     s_settings = 0;
-    if (s_linked && view_ready()) render_state();
-    else draw_status();
+    ui_present();
 }
 
 static void settings_action(void)
@@ -3333,7 +3565,7 @@ static void settings_action(void)
         s_have_state = 0;
         s_pong_have = 0; s_reversi_have = 0; s_tank_have = 0; s_uno_have = 0; s_c4_have = 0; s_ck_have = 0;
         s_settings = 0;
-        draw_status();
+        ui_present();
     } else if (s_sel == 1) {
         // Xbox 手柄: 未连 → 开始搜寻配对; 已连 → 断开
         if (xbox_is_connected()) {
@@ -3384,10 +3616,13 @@ static void poll_button(void)
     }
     if (tap_count > 0 && now > tap_deadline) {
         if (!s_settings) {
-            // 任何短按: 打开设置
-            s_settings = 1;
-            s_sel = 0;
-            draw_settings();
+            // 任何短按: 打开设置（外壳页下短按改为移动右栏焦点，见下方模块按键）
+            // 一个模块都没有时仍保留原菜单入口，避免被外壳锁死
+            if (!module_shell_active() || module_enabled_count() == 0) {
+                s_settings = 1;
+                s_sel = 0;
+                draw_settings();
+            }
         } else {
             if (tap_count == 1) {
                 s_sel = (s_sel + 1) % MENU_N;
@@ -3399,6 +3634,28 @@ static void poll_button(void)
             }
         }
         tap_count = 0;
+    }
+
+    // ---- 模块外壳按键（插在基座设置菜单逻辑之后，原有语义不变）----
+    // 外壳页: 短按<400ms=焦点下移, 长按>=600ms=确认进入；
+    // 镜像页: 只有长按(基座原本忽略)才进外壳并锁 60s。
+    {
+        static int m_down = 0;
+        static uint32_t m_t0 = 0;
+        if (!m_down && lv == 0) {
+            m_down = 1;
+            m_t0 = now;
+        } else if (m_down && lv == 1) {
+            m_down = 0;
+            int dur = (int)(now - m_t0);
+            if (!s_settings) {
+                if (module_shell_active()) {
+                    module_key(dur >= 600 ? 1 : 0, dur);
+                } else if (dur >= 600) {
+                    module_shell_enter();
+                }
+            }
+        }
     }
 }
 
@@ -3527,6 +3784,8 @@ void app_main(void)
     batt_init();
     wifi_espnow_init();
     xbox_init();
+    // 模块注册（SPI2 已初始化，LoRa 驱动在这里挂设备并起接收任务）
+    module_registry_init();
     // 配对过就按地址直连; 没配对过则开机扫 30 秒, 手柄进配对模式即可连上
     toast_set(xbox_has_saved() ? "正在自动连接 Xbox 手柄..." : "正在搜寻 Xbox 手柄...",
               C_YELLOW, 0);
@@ -3541,6 +3800,9 @@ void app_main(void)
 
     while (1) {
         poll_button();
+
+        // 模块外壳: 事件总线 + 各模块 tick + 外壳节流重绘（设置菜单打开时不打扰）
+        if (!s_settings) module_loop(now_ms(), ui_frame_fresh());
 
         // 诊断心跳: 主循环是否还在跑
         {
@@ -3564,7 +3826,7 @@ void app_main(void)
             if (s_linked != prev_linked) {
                 prev_linked = s_linked;
                 if (!s_linked) { s_have_state = 0; s_pong_have = 0; s_reversi_have = 0; s_tank_have = 0; s_uno_have = 0; s_c4_have = 0; s_ck_have = 0; }
-                if (!s_settings) draw_status();
+                if (!s_settings) ui_present();
             }
         }
 
@@ -3576,6 +3838,8 @@ void app_main(void)
                 esp_now_send(s_host, (const uint8_t*)"GMKACK", 6);
             }
         }
+
+        // 镜像兜底请求由 mod_mirror 模块自己广播（基座不感知），这里不再代发
 
         // 手柄 → 主机: 按键掩码(变化才发) + 手柄在线位 + 嘲讽快捷键
         {
@@ -3664,12 +3928,8 @@ void app_main(void)
             int old = s_batt_pct;
             batt_update();
             if (s_batt_pct != old) {
-                if (!s_settings) {
-                    if (s_linked && view_ready()) render_state();
-                    else draw_status();
-                } else {
-                    draw_settings();
-                }
+                if (!s_settings) ui_present();
+                else draw_settings();
             }
         }
 
@@ -3695,12 +3955,8 @@ void app_main(void)
                     break;
                 }
                 prev_xbox = st;
-                if (!s_settings) {
-                    if (s_linked && view_ready()) render_state();
-                    else draw_status();
-                } else {
-                    draw_settings();
-                }
+                if (!s_settings) ui_present();
+                else draw_settings();
             }
         }
 
@@ -3741,12 +3997,8 @@ void app_main(void)
                 else if (nu & (1u << 11)) nm = "视图";
                 strcat(tb, nm);
                 toast_set(tb, C_GREEN, 600);
-                if (!s_settings) {
-                    if (s_linked && view_ready()) render_state();
-                    else draw_status();
-                } else {
-                    draw_settings();
-                }
+                if (!s_settings) ui_present();
+                else draw_settings();
             }
         }
 
@@ -3757,12 +4009,8 @@ void app_main(void)
                 if (!pair_btn_tip) {
                     pair_btn_tip = 1;
                     toast_set("检测到手柄, 请长按配对键", C_ORANGE, 4000);
-                    if (!s_settings) {
-                        if (s_linked && view_ready()) render_state();
-                        else draw_status();
-                    } else {
-                        draw_settings();
-                    }
+                    if (!s_settings) ui_present();
+                    else draw_settings();
                 }
             } else {
                 pair_btn_tip = 0;
@@ -3778,40 +4026,32 @@ void app_main(void)
                 boot_scan_at = 0;
                 xbox_disconnect();
                 toast_set("未发现 Xbox 手柄, 可在设置中重试", C_DGRAY, 2500);
-                if (!s_settings) {
-                    if (s_linked && view_ready()) render_state();
-                    else draw_status();
-                } else {
-                    draw_settings();
-                }
+                if (!s_settings) ui_present();
+                else draw_settings();
             }
         }
 
         // 提示队列推进
         if (toast_tick()) {
-            if (!s_settings) {
-                if (s_linked && view_ready()) render_state();
-                else draw_status();
-            } else {
-                draw_settings();
-            }
+            if (!s_settings) ui_present();
+            else draw_settings();
         }
 
         // 新状态包渲染
         if (s_gs_ready) {
             s_gs_ready = 0;
-            if (s_linked && !s_settings) render_state();
+            if (!s_settings) ui_present();
         }
 
         // 胜利动画: 本地 130ms 刷新复刻阶段切换(仅五子棋)
-        if (s_linked && !s_settings && s_game_id == GID_GOMOKU && s_have_state && (s_gs.flags0 & F0_ANIM)
-            && now_ms() - s_last_render > 130) {
+        if (ui_mirror_active() && s_linked && !s_settings && s_game_id == GID_GOMOKU && s_have_state
+            && (s_gs.flags0 & F0_ANIM) && now_ms() - s_last_render > 130) {
             render_state();
         }
 
         // 作弊横幅滚动: 80ms 重绘一次(仅五子棋)
-        if (s_linked && !s_settings && s_game_id == GID_GOMOKU && s_have_state && (s_gs.flags1 & F1_CHEAT)
-            && now_ms() - s_last_render > 80) {
+        if (ui_mirror_active() && s_linked && !s_settings && s_game_id == GID_GOMOKU && s_have_state
+            && (s_gs.flags1 & F1_CHEAT) && now_ms() - s_last_render > 80) {
             render_state();
         }
 
@@ -3824,13 +4064,13 @@ void app_main(void)
             s2048_have = 0; s_tetris_have = 0; s_snake_have = 0; s_breakout_have = 0;
             s_ms_have = 0; s_flappy_have = 0; s_inv_have = 0; s_race_have = 0;
             s_fps_have = 0; s_shogi_have = 0;
-            if (!s_settings) draw_status();
+            if (!s_settings) ui_present();
         }
 
         // 搜寻/等待动画: 未连上或还没收到画面数据时持续刷新, 避免看起来像卡死
         if ((!s_linked || !view_ready()) && !s_settings && now_ms() - s_search_anim > 400) {
             s_search_anim = now_ms();
-            draw_status();
+            ui_present();
         }
 
         vTaskDelay(pdMS_TO_TICKS(10));

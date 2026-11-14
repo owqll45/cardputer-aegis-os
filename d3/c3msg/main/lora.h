@@ -52,6 +52,13 @@ int lora_send_text_tagged(uint32_t to, const char *text, uint16_t tag);
 /* 时间广播到 LoRa（广播地址，私有 port 0x0101）：utc=UTC 秒，src 0=未同步 1=GPS 2=手动 */
 int lora_send_time(uint32_t utc, uint8_t src);
 
+/* GMK 镜像兜底帧（私有 port 0x0102）。只走单槽镜像队列：
+ * 主队列（文本/时间）非空或正在发射时返回 -2（让路），不排队。 */
+int lora_send_mirror(const uint8_t *pay, int n);
+
+/* 1=空口空闲（没有正在发射的帧、主队列和镜像槽都空） */
+int lora_tx_idle(void);
+
 /* 发射功率（dBm）；无天线设备会被拒绝并保持 -9dBm */
 void lora_set_tx_power(int dbm);
 int  lora_tx_power_dbm(void);
