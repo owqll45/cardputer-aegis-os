@@ -170,7 +170,7 @@ void AppSysInfo::draw()
     // 滚动位置指示
     if (total > visible) {
         snprintf(buf, sizeof(buf), "%d/%d", _scroll + 1, total - visible + 1);
-        cv.setFont(&fonts::efontCN_10_b);
+        cv.setFont(&fonts::efontCN_10);
         cv.setTextColor(TFT_DARKGREY);
         cv.setCursor(w - 4 - cv.textWidth(buf), 2);
         cv.print(buf);
@@ -198,7 +198,7 @@ void AppSysInfo::draw()
     }
 
     // 底部提示
-    cv.setFont(&fonts::efontCN_10_b);
+    cv.setFont(&fonts::efontCN_10);
     cv.setTextColor(TFT_DARKGREY);
     cv.setCursor(4, h - hint_h + 1);
     cv.print("E/S 滚动  G0 返回");

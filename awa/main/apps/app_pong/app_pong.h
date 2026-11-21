@@ -32,6 +32,12 @@ private:
     uint32_t _last_step_ms = 0;
     float _ai_target_offset = 0;
 
+    int _diff = 2;        // 1~5 星, 5 星为预测+无误差(无法被打破)
+    bool _cheat = false;  // C 键: AI 挡板减半 + 球减速
+
+    int aiPaddleH() const { return _cheat ? (_paddleH / 2) : (_diff >= 5 ? 24 : _paddleH); }
+    float predictBallY() const;
+
     void updateGame();
     void updateUI();
     void resetBall();

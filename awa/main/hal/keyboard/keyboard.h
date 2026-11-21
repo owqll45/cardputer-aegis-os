@@ -7,6 +7,7 @@
 #include "keymap.h"
 #include "../utils/adafruit_tca8418/Adafruit_TCA8418.h"
 #include <mooncake_log_signal.h>
+#include <esp_timer.h>
 
 class Keyboard {
 public:
@@ -52,12 +53,27 @@ public:
     {
         return _event_queue_idx < _event_queue.size();
     }
+    // 最近一次"按下"事件的时间戳(ms), 用于测量按键→界面响应延迟
+    inline uint32_t lastPressMs() const
+    {
+        return _last_press_ms;
+    }
     inline const KeyEvent_t& dequeueEvent()
     {
         return _event_queue[_event_queue_idx++];
     }
     void clearKeyEvent();
     KeyEvent_t convertToKeyEvent(const KeyEventRaw_t& key);
+
+    // 诊断: 注入一个"已重映射"的原始按键事件(不经过 TCA8418),
+    // 用于测量 按键→菜单处理→推屏 的软件延迟(KEYTEST 指令使用)
+    void injectRawEvent(uint8_t row, uint8_t col, bool state)
+    {
+        _key_event_raw_buffer.state = state;
+        _key_event_raw_buffer.row   = row;
+        _key_event_raw_buffer.col   = col;
+        if (state) _last_press_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    }
 
 private:
     Adafruit_TCA8418* _tca8418 = nullptr;
@@ -68,6 +84,7 @@ private:
     KeyEvent_t _key_event_buffer;
     std::vector<KeyEvent_t> _event_queue;
     size_t _event_queue_idx = 0;
+    uint32_t _last_press_ms = 0;
 
     KeyEventRaw_t get_key_event_raw(const uint8_t& eventRaw);
     void remap(KeyEventRaw_t& key);

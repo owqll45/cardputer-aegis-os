@@ -97,6 +97,7 @@ void Keyboard::update()
         if (is_press) {
             if (now - last_press_time > 5) { 
                 last_press_time = now;
+                _last_press_ms  = (uint32_t)now;
                 _event_queue.push_back(_key_event_buffer);
                 ESP_LOGI("KEY", "press   %s code=0x%02X mod=0x%02X",
                          _key_event_buffer.keyName, (unsigned)_key_event_buffer.keyCode,

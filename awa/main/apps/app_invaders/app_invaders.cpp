@@ -169,11 +169,8 @@ void AppInvaders::onClose() {
     glink_release();
     if(_handle_key_event_slot_id >= 0) GetHAL().keyboard.onKeyEvent.disconnect(_handle_key_event_slot_id);
     
-    // Restore System Canvas
-    _canvas = &GetHAL().canvas();
-    _canvas->deleteSprite();
-    _canvas->setColorDepth(16);
-    _canvas->createSprite(GetHAL().display().width(), 109);
+    // 统一恢复系统画布（16bpp / 109 高）
+    appCanvasRestore(getAppInfo().name);
     
     _canvas = nullptr;
 }
@@ -208,7 +205,7 @@ void AppInvaders::updateUI() {
         _canvas->setTextDatum(top_left);
     }
     
-    _canvas->pushSprite(0, 0);
+    appCanvasPush(_canvas);
     sendMirrorState();
 }
 

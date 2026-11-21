@@ -30,6 +30,7 @@
 #define GLINK_GID_RACE     15
 #define GLINK_GID_FPS      16
 #define GLINK_GID_SHOGI    17
+#define GLINK_GID_DOUDIZHU 18
 
 // 图标 id(C3 预置图标表索引, 与 gomoku_c3/main/icons.c 顺序一致)
 #define GLINK_ICON_GENERIC 0
@@ -59,6 +60,9 @@ void glink_release();
 
 void glink_poll();           // 主循环里调: 信标 / 心跳 / 限频补发 / WiFi 存活探测
 bool glink_is_linked();
+
+// 系统设置里的"无线广播"开关：关掉后立刻停止信标，并且不再自动拉起 WiFi
+void glink_set_enabled(bool on);
 
 // 发送全量状态包(data 含 'G','M',type 头, byte3 由本层填序号, len ≤ 240)
 // 50ms 限频: 过频调用会暂存最后一包, 由 glink_poll 补发

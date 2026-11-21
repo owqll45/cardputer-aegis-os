@@ -9,10 +9,14 @@
 #include <apps/utils/common.h>
 #include <apps/utils/icons/generated_icons.h>
 #include <apps/utils/icons/generated_icons_extra.h>
+#include <apps/utils/icons/icon_settings_generated.h>
+#include <apps/utils/icons/test_folder_icon.h>
+#include <apps/utils/ui_theme.h>
 #include <mooncake_log.h>
 #include <mooncake.h>
 #include <apps/app_registry.h>
 #include <hal/hal.h>
+#include <hal/utils/perf.h>
 #include <string>
 #include <math.h>
 #include <map>
@@ -76,6 +80,8 @@ static AppIcon_t icon_relay(icon_relay_generated, icon_relay_generated);
 static AppIcon_t icon_clock(icon_clock_generated, icon_clock_generated);
 static AppIcon_t icon_imu(icon_imu_generated, icon_imu_generated);
 static AppIcon_t icon_network(icon_network_generated, icon_network_generated);
+static AppIcon_t icon_zdlink(icon_zdlink_generated, icon_zdlink_generated);
+static AppIcon_t icon_settings(icon_settings_generated, icon_settings_generated);
 
 // Folder Icon (Use generic for now or create one dynamically)
 // We can use icon_generic for folders
@@ -130,6 +136,11 @@ static void* get_icon_for_app(const std::string& name, void* defaultIcon) {
     if (name == "Clock") return &icon_clock;
     if (name == "IMU") return &icon_imu;
     if (name == "Network") return &icon_network;
+    if (name == "天链" || name == "LoRaChat") return &icon_zdlink;
+    if (name == "设置" || name == "Settings") return &icon_settings;
+    if (name == "Whack") return &icon_minesweeper;
+    if (name == "Blackjack") return &icon_dice;
+    if (name == "Maze") return &icon_matrix;
 
     return &icon_generic;
 }
@@ -140,31 +151,42 @@ void LauncherMenu::init(int launcherAppId)
 
     // Initialize Folders (Localized)
     _folders.clear();
-    _folders.push_back({"游戏 (Games)", {}});
-    _folders.push_back({"工具 (Tools)", {}});
-    _folders.push_back({"系统 (System)", {}});
+    // 240 宽屏下标签用短名: 带 "(Games)" 会和相邻标签撞在一起
+    _folders.push_back({"游戏", {}});
+    _folders.push_back({"工具", {}});
+    _folders.push_back({"系统", {}});
     
     // Define Categories
     std::vector<std::string> cat_games = {
         "Snake", "Tetris", "Breakout", "Pong", "Flappy", "Invaders", "Minesweeper", 
-        "Dino", "Cube3D", "Dice", "Coin", "Matrix", "2048", "Racing", "Gomoku", "Shogi", "FPS",
-        "Reversi", "Tank", "UNO", "Connect4", "Checkers"
+        "Dino", "Cube3D", "Dice", "Coin", "Matrix", "2048", "Gomoku", "Shogi", "FPS",
+        "Reversi", "Tank", "UNO", "Connect4", "Checkers", "Whack", "Blackjack", "Maze",
+        "Doudizhu", "Racing"
     };
     std::vector<std::string> cat_tools = {
         "Timer", "Stopwatch", "Flashlight", "Ruler", "Sketch", "Piano", "Drum", 
         "Breathing", "MusicBox", "SciCalc", "FuncCalc", "StringIR", "LoRaChat", "GPS", "Distance", "Temp/Humi+",
-        "Multimeter", "RelayTester", "Water Level"
+        "Multimeter", "RelayTester", "Water Level", "MicMeter", "IR Remote"
     };
     std::vector<std::string> cat_system = {
-        "SysInfo", "Network", "Clock", "Keyboard", "IMU"
+        "SysInfo", "Network", "Clock", "Keyboard", "IMU", "设置", "Settings"
     };
 
     // Classify Apps (from registry - lazy loading, no instantiation)
     auto& registry = GetAppRegistry();
+    _root_apps.clear();
+    _pinned_app = -1;
     for (size_t idx = 0; idx < registry.size(); idx++) {
         std::string name = registry[idx].name;
         int id = (int)idx;  // Registry index as menu ID
-        
+
+        // 系统设置归入「系统」文件夹, 不再置顶占桌面根目录
+        // 天链终端：直接放在主页最前面, 不用进文件夹翻
+        if (name == "天链") {
+            _root_apps.insert(_root_apps.begin(), id);
+            continue;
+        }
+
         bool found = false;
         
         // Check Games
@@ -203,7 +225,7 @@ void LauncherMenu::init(int launcherAppId)
     getSelectorShape().y.springOptions().visualDuration   = 0.4;
 
     // Default app number
-    moveTo(1);
+    moveTo(0);
 
     // Read input in every update
     setConfig().readInputInterval = 0;
@@ -245,7 +267,25 @@ void LauncherMenu::updateMenuItems() {
             }
         }
     } else {
-        // Root: Show Folders first
+        // 天链: 第一屏就能看到, 不用往右翻
+        size_t root_from = 0;
+        if (!_root_apps.empty()) {
+            const int regIdx = _root_apps.front();
+            if (regIdx >= 0 && regIdx < (int)GetAppRegistry().size() &&
+                GetAppRegistry()[regIdx].name == "天链") {
+                MenuItem item;
+                item.name = GetAppRegistry()[regIdx].name;
+                item.isFolder = false;
+                item.id = regIdx;
+                _current_menu_items.push_back(item);
+                addOption({Vector4i{ICON_GAP + i * (ICON_WIDTH + ICON_GAP), ICON_MARGIN_TOP, ICON_WIDTH, ICON_WIDTH},
+                           get_icon_for_app(item.name, nullptr)});
+                i++;
+                root_from = 1;
+            }
+        }
+
+        // Then Folders
         for (int f=0; f<_folders.size(); f++) {
             if (_folders[f].appIds.empty()) continue; // Skip empty folders
             
@@ -259,12 +299,14 @@ void LauncherMenu::updateMenuItems() {
             void* ficon = &icon_folder_system;
             if (f == 0) ficon = &icon_folder_games;
             else if (f == 1) ficon = &icon_folder_tools;
+            else if (f == 2) ficon = &icon_folder_system;
             addOption({Vector4i{ICON_GAP + i * (ICON_WIDTH + ICON_GAP), ICON_MARGIN_TOP, ICON_WIDTH, ICON_WIDTH}, ficon});
             i++;
         }
         
         // Then Root Apps
-        for (int regIdx : _root_apps) {
+        for (size_t r = root_from; r < _root_apps.size(); r++) {
+            int regIdx = _root_apps[r];
             if (regIdx >= 0 && regIdx < (int)GetAppRegistry().size()) {
                 MenuItem item;
                 item.name = GetAppRegistry()[regIdx].name;
@@ -363,7 +405,7 @@ void LauncherMenu::onReadInput()
     }
 
     // Debounce Check (Global)
-    if (GetHAL().millis() - _last_input_time < 200) { // Reduced to 200ms for better responsiveness
+    if (GetHAL().millis() - _last_input_time < 80) { // 80ms: 按键响应优先, 硬件本身已消抖
         return;
     }
 
@@ -374,6 +416,9 @@ void LauncherMenu::onReadInput()
     if (event.state == true && !_last_key_state) {
         _last_key_state = true;
         _last_input_time = GetHAL().millis();
+        _key_event_ms = GetHAL().keyboard.lastPressMs();
+        _action_ms = perf_ms();
+        _latency_pending = true;
 
         // Left
         if (event.row == 3 && event.col == 10) {
@@ -485,9 +530,14 @@ void LauncherMenu::onRender()
             int center_x = i.keyframe.x + i.keyframe.width / 2 + x_offset;
             int center_y = i.keyframe.y + i.keyframe.height / 2 + (int)float_y;
             
-            // Glow effect (Concentric rounded rects)
+            // Glow effect (Concentric rounded rects) - 使用系统设置里的配色
+            uint16_t ac = uiAccentColor();
+            uint8_t ar = (uint8_t)(((ac >> 11) & 0x1F) * 255 / 31);
+            uint8_t ag = (uint8_t)(((ac >> 5) & 0x3F) * 255 / 63);
+            uint8_t ab = (uint8_t)((ac & 0x1F) * 255 / 31);
             for (int r = 0; r < 5; r++) {
-                uint16_t glow_color = GetHAL().canvas().color565(100 - r*20, 255 - r*40, 255);
+                uint16_t glow_color = GetHAL().canvas().color565(
+                    ar * (5 - r) / 5, ag * (5 - r) / 5, ab * (5 - r) / 5);
                 GetHAL().canvas().drawRoundRect(
                     center_x - ICON_SELECTED_WIDTH/2 - r,
                     center_y - ICON_SELECTED_WIDTH/2 - r,
@@ -572,6 +622,16 @@ void LauncherMenu::onRender()
 
     if (pushCanvas) {
         GetHAL().pushCanvas();
+    }
+
+    // 按键延迟: poll = 硬件按下→菜单处理, frame = 处理→本帧推屏完成
+    if (_latency_pending) {
+        _latency_pending = false;
+        uint32_t now = perf_ms();
+        ESP_LOGI("PERF", "key poll=%ums frame=%ums total=%ums",
+                 (unsigned)(_action_ms - _key_event_ms),
+                 (unsigned)(now - _action_ms),
+                 (unsigned)(now - _key_event_ms));
     }
 }
 

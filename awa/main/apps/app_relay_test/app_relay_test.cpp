@@ -12,8 +12,6 @@ AppRelayTest::~AppRelayTest() {}
 
 void AppRelayTest::onOpen() {
     // 不再修改 M5.Display 的 rotation / colorDepth，只接管两个 GPIO
-    esp_log_level_set("*", ESP_LOG_NONE);
-
     gpio_reset_pin(GPIO_NUM_1);
     gpio_reset_pin(GPIO_NUM_2);
 
@@ -27,7 +25,6 @@ void AppRelayTest::onOpen() {
 }
 
 void AppRelayTest::onClose() {
-    esp_log_level_set("*", ESP_LOG_INFO);
     // 恢复引脚为默认状态，避免影响其他应用
     gpio_reset_pin((gpio_num_t)_pins[0]);
     gpio_reset_pin((gpio_num_t)_pins[1]);
@@ -119,7 +116,7 @@ void AppRelayTest::draw_ui() {
 
     // 左：状态卡片
     ui_card(cv, 6, 28, 116, 58, _relay_state);
-    cv.setFont(&fonts::efontCN_10_b);
+    cv.setFont(&fonts::efontCN_10);
     cv.setTextColor(UI_SUB);
     cv.setCursor(12, 31);
     cv.print("输出状态");
@@ -134,7 +131,7 @@ void AppRelayTest::draw_ui() {
     const char* mode_str = (_drive_mode == 0) ? "推挽" : (_drive_mode == 1) ? "开漏" : "悬空";
     snprintf(buf, sizeof(buf), "%s  ·  %s", _pin_names[_selected_pin_idx],
              _logic_active_high ? "高有效" : "低有效");
-    cv.setFont(&fonts::efontCN_10_b);
+    cv.setFont(&fonts::efontCN_10);
     cv.setTextColor(UI_SUB);
     cv.setTextDatum(top_center);
     cv.drawString(buf, 64, 72);
@@ -152,7 +149,7 @@ void AppRelayTest::draw_ui() {
     ui_kv(cv, x + 6, 67, w - 12, "驱动模式", mode_str, UI_ACCENT);
 
     // 底部键位
-    cv.setFont(&fonts::efontCN_10_b);
+    cv.setFont(&fonts::efontCN_10);
     cv.setTextColor(UI_SUB);
     cv.setCursor(6, 88);
     cv.print("Q:换引脚  A/D:逻辑  W/S:驱动  空格:开关");

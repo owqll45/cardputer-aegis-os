@@ -4,6 +4,28 @@
 #include <apps/utils/glink/glink.h>
 #include <apps/utils/app_canvas.h>
 #include <esp_random.h>
+#include <math.h>
+
+/* efontCN 里没有 ★/☆ 字形(会渲染成一根 1px 竖线), 难度星直接画五角星 */
+static void draw_stars(LGFX_Sprite* cv, int x, int cy, int diff, int R, uint16_t on, uint16_t off)
+{
+    for (int s = 0; s < 5; s++) {
+        int cx = x + s * (R * 2 + 3);
+        int16_t px[10], py[10];
+        for (int i = 0; i < 10; i++) {
+            float a = -1.5707963f + (float)i * 0.62831853f;
+            float rr = (i & 1) ? (float)R * 0.45f : (float)R;
+            px[i] = (int16_t)(cx + cosf(a) * rr);
+            py[i] = (int16_t)(cy + sinf(a) * rr);
+        }
+        uint16_t c = (s < diff) ? on : off;
+        for (int i = 0; i < 10; i++) {
+            int j = (i + 1) % 10;
+            if (s < diff) cv->fillTriangle(cx, cy, px[i], py[i], px[j], py[j], c);
+            else cv->drawLine(px[i], py[i], px[j], py[j], c);
+        }
+    }
+}
 
 AppPong::AppPong() {
     setAppInfo().name = "Pong";
@@ -53,6 +75,16 @@ void AppPong::onOpen() {
                                   e.keyCode == KEY_W || e.keyCode == KEY_S)) {
                     _menu_sel ^= 1;
                 }
+                // 左右键调难度(1~5 星)
+                if(_mode == 0 && (e.keyCode == KEY_LEFT || e.keyCode == KEY_RIGHT)) {
+                    _diff += (e.keyCode == KEY_RIGHT) ? 1 : -1;
+                    if(_diff < 1) _diff = 1;
+                    if(_diff > 5) _diff = 5;
+                }
+                // C 键作弊开关(对局中生效): AI 挡板减半 + 球减速
+                if(_mode != 0 && e.keyCode == KEY_C) {
+                    _cheat = !_cheat;
+                }
                 if(_mode == 0 && e.keyCode == KEY_ENTER) {
                     _mode = _menu_sel + 1;
                     restart();
@@ -71,7 +103,29 @@ void AppPong::resetBall() {
     _ballY = _canvas->height() / 2;
     _ballDX = (esp_random() % 2 ? 2.5f : -2.5f);
     _ballDY = (esp_random() % 2 ? 1.0f : -1.0f);
-    _ai_target_offset = (esp_random() % 100 < 20) ? (float)((int)(esp_random() % 25) - 12) : 0.0f;
+    /* 星级越高误差越小; 5 星零误差。作弊时也清零, 方便验证"能破"。 */
+    int err = (6 - _diff) * 6;
+    if (!_cheat && _diff < 5) {
+        _ai_target_offset = (float)((int)(esp_random() % (err * 2 + 1)) - err);
+    } else {
+        _ai_target_offset = 0.0f;
+    }
+}
+
+float AppPong::predictBallY() const
+{
+    int w = _canvas ? _canvas->width() : 240;
+    int h = _canvas ? _canvas->height() : 109;
+    if (fabsf(_ballDX) < 0.05f) return _ballY;
+    float t = (w - 9 - _paddleW - _ballX) / _ballDX;
+    if (t < 0) return _ballY;
+    float y = _ballY + _ballDY * t;
+    float span = h - 4;
+    if (span <= 1) return _ballY;
+    float m = fmodf(y, span * 2.0f);
+    if (m < 0) m += span * 2.0f;
+    if (m > span) m = span * 2.0f - m;
+    return m;
 }
 
 void AppPong::restart() {
@@ -104,14 +158,19 @@ void AppPong::updateGame() {
         if(btn & 0x0001) _paddle2Y -= 2.5f;
         if(btn & 0x0002) _paddle2Y += 2.5f;
     } else {
-        // AI with limited speed and aim error
-        float targetY = _ballY + _ai_target_offset;
-        float diff = targetY - (_paddle2Y + _paddleH/2);
-        if(diff < -1.5f) _paddle2Y -= 1.5f;
-        if(diff > 1.5f) _paddle2Y += 1.5f;
+        /* AI: 星级决定跟随速度/误差/是否预测落点; 5 星完美预测 + 零误差,
+         * 挡板更高(24px), 正常球速下打不穿。C 键作弊会把挡板砍半并减速。 */
+        float spd = (_diff >= 5) ? 6.0f : (1.2f + _diff * 0.5f);
+        if (_cheat) spd *= 0.8f;
+        float targetY = (_diff >= 4) ? predictBallY() : _ballY;
+        targetY += _ai_target_offset;
+        float diff = targetY - (_paddle2Y + aiPaddleH() / 2.0f);
+        if (diff < -spd) _paddle2Y -= spd;
+        else if (diff > spd) _paddle2Y += spd;
+        else _paddle2Y = targetY - aiPaddleH() / 2.0f;
     }
     if(_paddle2Y < 0) _paddle2Y = 0;
-    if(_paddle2Y > h - _paddleH) _paddle2Y = h - _paddleH;
+    if(_paddle2Y > h - aiPaddleH()) _paddle2Y = h - aiPaddleH();
 
     // Ball
     _ballX += _ballDX;
@@ -132,9 +191,10 @@ void AppPong::updateGame() {
         _ballDX = (_ballDX < 0) ? -_ballDX : _ballDX;
         if(_ballDX < 6) _ballDX += 0.5f; // Speed up (capped)
     }
-    if(_ballX + 4 >= w - 4 - _paddleW && _ballX < w && _ballY + 4 >= _paddle2Y && _ballY <= _paddle2Y + _paddleH) {
+    if(_ballX + 4 >= w - 4 - _paddleW && _ballX < w && _ballY + 4 >= _paddle2Y && _ballY <= _paddle2Y + aiPaddleH()) {
         _ballX = w - 9 - _paddleW;
         _ballDX = (_ballDX > 0) ? -_ballDX : _ballDX;
+        if (_cheat) { _ballDX *= 0.8f; _ballDY *= 0.8f; }
     }
 
     // Score
@@ -173,11 +233,8 @@ void AppPong::onClose() {
 
     glink_release();
 
-    // Restore System Canvas
-    _canvas = &GetHAL().canvas();
-    _canvas->deleteSprite();
-    _canvas->createSprite(GetHAL().display().width(), 109);
-
+    // 统一恢复系统画布（16bpp / 109 高）
+    appCanvasRestore(getAppInfo().name);
     _canvas = nullptr;
 }
 
@@ -193,14 +250,14 @@ void AppPong::updateUI() {
         _canvas->setFont(&fonts::efontCN_12);
         _canvas->setTextColor(TFT_CYAN);
         int tw = _canvas->textWidth("Pong");
-        _canvas->setCursor((w - tw) / 2, 18);
+        _canvas->setCursor((w - tw) / 2, 8);
         _canvas->print("Pong");
 
         const char* items[2] = { "单人游戏", "双人联机" };
         for(int i = 0; i < 2; i++) {
             int iw = _canvas->textWidth(items[i]);
             int ix = (w - iw) / 2;
-            int iy = 50 + i * 22;
+            int iy = 34 + i * 20;
             if(i == _menu_sel) {
                 _canvas->fillRect(ix - 10, iy - 2, iw + 20, 16, TFT_DARKGREY);
                 _canvas->setTextColor(TFT_YELLOW);
@@ -210,14 +267,28 @@ void AppPong::updateUI() {
             _canvas->setCursor(ix, iy);
             _canvas->print(items[i]);
         }
-        // 手柄在线状态提示
+
+        // 难度星级: ←→ 调整, 5 星 = 无法被打破
+        char dbuf[16];
+        snprintf(dbuf, sizeof(dbuf), "难度");
+        int dw = _canvas->textWidth(dbuf);
+        int stars_w = 5 * (5 * 2 + 3) - 3;
+        int x0 = (w - (dw + 6 + stars_w)) / 2;
+        _canvas->setTextColor(_diff >= 5 ? TFT_RED : TFT_CYAN);
+        _canvas->setCursor(x0, 74);
+        _canvas->print(dbuf);
+        draw_stars(_canvas, x0 + dw + 6 + 5, 80, _diff, 5,
+                   _diff >= 5 ? TFT_RED : TFT_CYAN, TFT_DARKGREY);
+
+        // 手柄在线状态提示(顺带告诉作弊键, 对局中按 C 生效)
+        _canvas->setFont(&fonts::efontCN_10);
         _canvas->setTextColor((glink_remote_flags() & 0x01) ? TFT_GREEN : TFT_RED);
-        const char* hs = (glink_remote_flags() & 0x01) ? "手柄已连接" : "手柄未连接";
+        const char* hs = (glink_remote_flags() & 0x01) ? "手柄已连接  C=作弊" : "手柄未连接  C=作弊";
         int hw = _canvas->textWidth(hs);
-        _canvas->setCursor((w - hw) / 2, h - 20);
+        _canvas->setCursor((w - hw) / 2, h - 18);
         _canvas->print(hs);
 
-        _canvas->pushSprite(0, 0);
+        appCanvasPush(_canvas);
         sendMirrorState();
         return;
     }
@@ -227,13 +298,24 @@ void AppPong::updateUI() {
 
     // Paddles
     _canvas->fillRect(4, (int)_paddle1Y, _paddleW, _paddleH, TFT_WHITE);
-    _canvas->fillRect(w - 4 - _paddleW, (int)_paddle2Y, _paddleW, _paddleH, _mode == 2 ? TFT_CYAN : TFT_WHITE);
+    _canvas->fillRect(w - 4 - _paddleW, (int)_paddle2Y, _paddleW, aiPaddleH(), _mode == 2 ? TFT_CYAN : TFT_WHITE);
+
+    // 难度 / 作弊提示
+    if(_mode == 1) {
+        draw_stars(_canvas, 5, h - 6, _diff, 4,
+                   _diff >= 5 ? TFT_RED : TFT_DARKGREY, TFT_DARKGREY);
+        if(_cheat) {
+            _canvas->setTextColor(TFT_MAGENTA);
+            _canvas->setCursor(w - 52, h - 10);
+            _canvas->print("CHEAT");
+        }
+    }
 
     // Ball
     _canvas->fillRect((int)_ballX, (int)_ballY, 4, 4, TFT_WHITE);
 
     // Score
-    _canvas->setFont(&fonts::Font2);
+    _canvas->setFont(&fonts::efontCN_12);
     _canvas->setTextColor(TFT_WHITE);
     _canvas->setCursor(w/2 - 20, 10);
     _canvas->printf("%d", _score1);
@@ -259,7 +341,7 @@ void AppPong::updateUI() {
         _canvas->print(hint);
     }
 
-    _canvas->pushSprite(0, 0);
+    appCanvasPush(_canvas);
     sendMirrorState();
 }
 

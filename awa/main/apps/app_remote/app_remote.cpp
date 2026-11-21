@@ -37,7 +37,7 @@ void AppRemote::onRunning() {
 
     // 输入卡片
     ui_card(cv, 6, 28, 228, 30);
-    cv.setFont(&fonts::efontCN_10_b);
+    cv.setFont(&fonts::efontCN_10);
     cv.setTextColor(UI_SUB);
     cv.setCursor(12, 32);
     cv.print("地址 + 指令（十六进制）");
@@ -52,7 +52,7 @@ void AppRemote::onRunning() {
     }
 
     // 格式提示
-    cv.setFont(&fonts::efontCN_10_b);
+    cv.setFont(&fonts::efontCN_10);
     cv.setTextColor(UI_SUB);
     cv.setCursor(8, 63);
     cv.print("格式  地址 指令    示例  0 0x12");

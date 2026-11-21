@@ -62,7 +62,7 @@ void AppStringIRToolKit::render_text_input_line() {
     bool focus = (_focus_line == FocusLine::TextInput);
     ui_card(c, 6, 28, 228, 30, focus);
 
-    c.setFont(&fonts::efontCN_10_b);
+    c.setFont(&fonts::efontCN_10);
     c.setTextColor(UI_SUB);
     c.setCursor(12, 32);
     c.print("要发送的文本");
@@ -89,7 +89,7 @@ void AppStringIRToolKit::render_style_line() {
     snprintf(buf, sizeof(buf), "样式  [%s]", _style_options[_style_index].c_str());
     ui_kv(c, 12, 65, 150, "显示效果", buf, focus ? UI_ACCENT : UI_TEXT);
 
-    c.setFont(&fonts::efontCN_10_b);
+    c.setFont(&fonts::efontCN_10);
     c.setTextColor(UI_SUB);
     c.setTextDatum(top_right);
     c.drawString("A / D 切换", 228, 65);
@@ -98,7 +98,7 @@ void AppStringIRToolKit::render_style_line() {
 
 void AppStringIRToolKit::render_help_line() {
     auto& c = GetHAL().canvas();
-    c.setFont(&fonts::efontCN_10_b);
+    c.setFont(&fonts::efontCN_10);
     c.setTextColor(UI_SUB);
     c.setCursor(8, 88);
     c.printf("已输入 %d / %d 字符", (int)_input_text.length(), (int)INPUT_BUFFER_SIZE);

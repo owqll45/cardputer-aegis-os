@@ -56,7 +56,7 @@ void UIRenderer::renderPowerDashboard()
     M5.Display.setCursor(10, 25);
     M5.Display.printf("%.2f V", v);
 
-    M5.Display.setFont(&fonts::Font0);
+    M5.Display.setFont(&fonts::efontCN_12);
     M5.Display.setTextColor(TFT_WHITE);
     M5.Display.setCursor(10, 45);
     M5.Display.printf("电流: %.1f mA  功率: %.2f W", current, abs(v * current / 1000.0f));
@@ -95,6 +95,7 @@ void UIRenderer::drawDashboardChart(int x, int y, int w, int h, const std::vecto
     M5.Display.setTextSize(1);
     M5.Display.setTextColor(0x7BEF);
     M5.Display.setTextDatum(top_right);
+    M5.Display.setFont(&fonts::efontCN_12);
     M5.Display.drawString(label, x + w - 2, y + 2);
 
     if (data.size() < 2) return;

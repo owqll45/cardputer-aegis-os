@@ -105,7 +105,7 @@ void AppSetWiFi::render_main() {
     for (int i = 0; i < 3; i++) {
         int y = 57 + i * 12;
         bool hi = (_sel == i + 1);
-        cv.setFont(&fonts::efontCN_10_b);
+        cv.setFont(&fonts::efontCN_10);
         cv.setTextColor(hi ? UI_ACCENT : UI_TEXT);
         cv.setCursor(14, y);
         cv.print(hi ? "> " : "  ");
@@ -153,7 +153,7 @@ void AppSetWiFi::render_scan() {
         bool hi = (idx == _sel);
         ui_card(cv, 6, y, 228, 16, hi);
 
-        cv.setFont(&fonts::efontCN_10_b);
+        cv.setFont(&fonts::efontCN_10);
         cv.setTextColor(hi ? UI_ACCENT : UI_TEXT);
         cv.setCursor(12, y + 3);
         // 过长名称截断
@@ -182,7 +182,7 @@ void AppSetWiFi::render_input() {
     auto& cv = GetHAL().canvas();
 
     if (!_need_ssid && !_ssid.empty()) {
-        cv.setFont(&fonts::efontCN_10_b);
+        cv.setFont(&fonts::efontCN_10);
         cv.setTextColor(UI_SUB);
         cv.setCursor(8, 27);
         cv.printf("目标网络：%s", _ssid.c_str());
@@ -216,7 +216,7 @@ void AppSetWiFi::render_input() {
         cv.drawFastVLine(cx + 1, 44, 14, UI_ACCENT);
     }
 
-    cv.setFont(&fonts::efontCN_10_b);
+    cv.setFont(&fonts::efontCN_10);
     cv.setTextColor(UI_SUB);
     cv.setCursor(8, 71);
     cv.print("字母 / 数字 / 空格 / .  删除键退格");

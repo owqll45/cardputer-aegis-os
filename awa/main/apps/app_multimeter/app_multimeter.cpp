@@ -2,6 +2,7 @@
 #include <mooncake_log.h>
 #include <hal/hal.h>
 #include <M5GFX.h>
+#include <M5Unified.hpp>
 #include <cstring>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -41,7 +42,11 @@ void AppMultimeter::onRunning() {
 
     _draw_ui();
 
-    ui_hint(cv, "实时采样 10Hz  G0 返回");
+    if (_adc_handle == nullptr) {
+        ui_hint(cv, "ADC 不可用  G0 返回");
+    } else {
+        ui_hint(cv, "实时采样 10Hz  G0 返回");
+    }
     GetHAL().pushCanvas();
 
     vTaskDelay(pdMS_TO_TICKS(100));
@@ -53,19 +58,25 @@ void AppMultimeter::onClose() {
 }
 
 void AppMultimeter::_init_adc() {
-    // ADC1 Channel 0 (GPIO1) for voltage
+    // ADC1 GPIO1 (Grove G1)
     _adc_chan_v = ADC_CHANNEL_0;
 
-    adc_oneshot_unit_init_cfg_t init_config = {
-        .unit_id = ADC_UNIT_1,
-    };
-    adc_oneshot_new_unit(&init_config, &_adc_handle);
+    // 板上电池采样已由 M5.Power 占用了 ADC1 单元, 再 new_unit 必然失败并刷错误日志。
+    // 直接复用 Power 的共享单元, 只给它加一个通道配置。
+    _adc_handle = M5.Power.getAdcOneShotHandle();
+    if (_adc_handle == nullptr) {
+        ESP_LOGE(getAppInfo().name.c_str(), "ADC1 unavailable");
+        return;
+    }
 
     adc_oneshot_chan_cfg_t chan_config = {
         .atten = ADC_ATTEN_DB_12,
         .bitwidth = ADC_BITWIDTH_DEFAULT,
     };
-    adc_oneshot_config_channel(_adc_handle, _adc_chan_v, &chan_config);
+    if (adc_oneshot_config_channel(_adc_handle, _adc_chan_v, &chan_config) != ESP_OK) {
+        _adc_handle = nullptr;
+        return;
+    }
 
     adc_cali_curve_fitting_config_t cali_config = {
         .unit_id = ADC_UNIT_1,
@@ -78,10 +89,8 @@ void AppMultimeter::_init_adc() {
 }
 
 void AppMultimeter::_deinit_adc() {
-    if (_adc_handle) {
-        adc_oneshot_del_unit(_adc_handle);
-        _adc_handle = nullptr;
-    }
+    // 单元归 M5.Power 所有, 不能 del, 只释放本 app 的校准句柄
+    _adc_handle = nullptr;
     if (_cali_handle) {
         adc_cali_delete_scheme_curve_fitting(_cali_handle);
         _cali_handle = nullptr;
@@ -90,7 +99,9 @@ void AppMultimeter::_deinit_adc() {
 
 float AppMultimeter::_read_voltage_mv(adc_channel_t chan) {
     int raw = 0;
-    adc_oneshot_read(_adc_handle, chan, &raw);
+    if (_adc_handle == nullptr || adc_oneshot_read(_adc_handle, chan, &raw) != ESP_OK) {
+        return 0;
+    }
     int voltage_mv = 0;
     if (_cali_handle) {
         adc_cali_raw_to_voltage(_cali_handle, raw, &voltage_mv);

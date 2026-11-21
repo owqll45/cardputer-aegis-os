@@ -74,7 +74,7 @@ void AppWaterLevel::onRunning() {
     ui_big_value(cv, 54, 24, buf, "%", _current_level > 85 ? UI_BAD : UI_ACCENT);
 
     snprintf(buf, sizeof(buf), "原始值 %d", _raw_value);
-    cv.setFont(&fonts::efontCN_10_b);
+    cv.setFont(&fonts::efontCN_10);
     cv.setTextColor(UI_SUB);
     cv.setCursor(102, 27);
     cv.print(buf);

@@ -1,82 +1,162 @@
 #include "app_imu.h"
+#include <apps/utils/app_canvas.h>
+#include <apps/utils/theme.h>
 #include <mooncake_log.h>
 #include <hal/hal.h>
-#include "../utils/ui_kit.h"
-#include <cmath>
+#include <math.h>
+#include <stdio.h>
 
-AppImu::AppImu() { setAppInfo().name = "IMU"; }
+AppImu::AppImu() { setAppInfo().name = "Level"; }
 AppImu::~AppImu() {}
 
-void AppImu::onOpen() {
+void AppImu::onOpen()
+{
     mclog::tagInfo(getAppInfo().name, "opened");
-    _panel_angle = 0.0f;
+    GetHAL().display().fillScreen(TFT_BLACK);
+
+    _canvas = &GetHAL().canvas();
+    appCanvasBegin(_canvas, getAppInfo().name);
+
     GetHAL().imu.begin();
+    _zero_pitch = 0.0f;
+    _zero_roll  = 0.0f;
+
+    _key_slot = GetHAL().keyboard.onKeyEvent.connect([this](const Keyboard::KeyEvent_t& k) {
+        if (k.isModifier || !k.state) return;
+        if (k.keyCode == KEY_SPACE) _cal_req = true;
+    });
+
+    _imu = m5::imu_data_t();
+    draw();
 }
 
-void AppImu::onRunning() {
-    // 全局统一返回键：G0 侧键（与五子棋一致）
-    if (GetHAL().goButton().wasClicked()) { close(); return; }
+void AppImu::onRunning()
+{
+    if (GetHAL().goButton().wasClicked()) {
+        close();
+        return;
+    }
 
-    auto& cv = GetHAL().canvas();
-    cv.fillScreen(UI_BG);
-    ui_title(cv, "姿态 IMU");
+    GetHAL().imu.getImuData(&_imu);
 
-    GetHAL().imu.getImuData(&_imu_data);
-    render_imu_data_label();
-    render_imu_panel();
+    float ax = _imu.accel.x;
+    float ay = _imu.accel.y;
+    float az = _imu.accel.z;
 
-    ui_hint(cv, "水平仪实时显示  G0 返回");
-    GetHAL().pushCanvas();
+    float pitch = atan2f(-ax, sqrtf(ay * ay + az * az)) * 180.0f / (float)M_PI;
+    float roll  = atan2f(ay, az) * 180.0f / (float)M_PI;
+
+    if (_cal_req) {
+        _cal_req    = false;
+        _zero_pitch = pitch;
+        _zero_roll  = roll;
+    }
+
+    _pitch = pitch - _zero_pitch;
+    _roll  = roll - _zero_roll;
+
+    draw();
 }
 
-void AppImu::onClose() { mclog::tagInfo(getAppInfo().name, "closed"); }
+void AppImu::onClose()
+{
+    if (_key_slot >= 0) {
+        GetHAL().keyboard.onKeyEvent.disconnect(_key_slot);
+        _key_slot = -1;
+    }
+    appCanvasRestore(getAppInfo().name);
+    _canvas = nullptr;
+}
 
-void AppImu::render_imu_data_label() {
-    auto& cv = GetHAL().canvas();
-    char buf[48];
+void AppImu::draw()
+{
+    if (!_canvas) return;
+    auto& cv = *_canvas;
 
-    ui_card(cv, 84, 28, 150, 34);
-    cv.setFont(&fonts::efontCN_10_b);
-    cv.setTextColor(UI_SUB);
-    cv.setCursor(90, 31);
-    cv.print("加速度 m/s²");
-    cv.setFont(&fonts::efontCN_12);
-    cv.setTextColor(UI_ACCENT);
-    snprintf(buf, sizeof(buf), "%+.1f %+.1f %+.1f", _imu_data.accel.x, _imu_data.accel.y, _imu_data.accel.z);
-    cv.setCursor(90, 44);
+    cv.fillScreen(0x0841);
+
+    // 标题
+    cv.fillRect(0, 0, 240, 13, 0x1082);
+    cv.setFont(&fonts::efontCN_10);
+    cv.setTextColor(TFT_WHITE);
+    cv.setCursor(4, 3);
+    cv.print("LEVEL / 水平仪");
+    cv.setTextColor(0x7BEF);
+    cv.setCursor(150, 3);
+    cv.print(_cal_req ? "CAL..." : "G0 EXIT");
+
+    // 气泡圆盘
+    const int cx = 68, cy = 72, R = 48;
+    cv.fillCircle(cx, cy, R, 0x10A2);
+    cv.drawCircle(cx, cy, R, 0x4A69);
+    cv.drawCircle(cx, cy, (int)(R * 0.66f), 0x39E7);
+    cv.drawCircle(cx, cy, (int)(R * 0.33f), 0x39E7);
+    cv.drawCircle(cx, cy, 2, 0xFFFF);
+    cv.drawFastHLine(cx - R, cy, R * 2, 0x39E7);
+    cv.drawFastVLine(cx, cy - R, R * 2, 0x39E7);
+
+    // ±30° 映射到半径
+    float nx = _roll / 30.0f;
+    float ny = _pitch / 30.0f;
+    float m  = sqrtf(nx * nx + ny * ny);
+    if (m > 1.0f) {
+        nx /= m;
+        ny /= m;
+        m = 1.0f;
+    }
+    int bx = cx + (int)(nx * (R - 7));
+    int by = cy + (int)(ny * (R - 7));
+
+    bool level = (fabsf(_pitch) < 1.5f && fabsf(_roll) < 1.5f);
+    uint16_t bubble = level ? TFT_GREEN : (m > 0.75f ? TFT_RED : TFT_YELLOW);
+    cv.fillCircle(bx, by, 7, bubble);
+    cv.drawCircle(bx, by, 7, TFT_WHITE);
+
+    // 右侧读数
+    char buf[40];
+    cv.setFont(&fonts::efontCN_10);
+
+    cv.setTextColor(0x7BEF);
+    cv.setCursor(132, 22);
+    cv.print("PITCH");
+    cv.setTextColor(level ? TFT_GREEN : TFT_WHITE);
+    cv.setFont(&fonts::Font2);
+    cv.setCursor(132, 31);
+    snprintf(buf, sizeof(buf), "%+6.1f", _pitch);
     cv.print(buf);
 
-    ui_card(cv, 84, 66, 150, 24);
-    ui_kv(cv, 90, 70, 138, "角速度", buf);
-}
+    cv.setFont(&fonts::efontCN_10);
+    cv.setTextColor(0x7BEF);
+    cv.setCursor(132, 52);
+    cv.print("ROLL");
+    cv.setTextColor(level ? TFT_GREEN : TFT_WHITE);
+    cv.setFont(&fonts::Font2);
+    cv.setCursor(132, 61);
+    snprintf(buf, sizeof(buf), "%+6.1f", _roll);
+    cv.print(buf);
 
-void AppImu::render_imu_panel() {
-    auto& cv = GetHAL().canvas();
-    update_panel_angle();
+    cv.setFont(&fonts::efontCN_10);
+    cv.setTextColor(0x7BEF);
+    cv.setCursor(132, 82);
+    snprintf(buf, sizeof(buf), "G %+4.0f %+4.0f", _imu.gyro.x, _imu.gyro.y);
+    cv.print(buf);
+    cv.setCursor(132, 92);
+    snprintf(buf, sizeof(buf), "Z %+4.0f d/s", _imu.gyro.z);
+    cv.print(buf);
 
-    int cx = 41, cy = 60, r = 26;
-    cv.fillCircle(cx, cy, r, UI_CARD);
-    cv.drawCircle(cx, cy, r, UI_LINE);
-    cv.drawCircle(cx, cy, 10, UI_LINE);
-    cv.drawFastHLine(cx - r + 4, cy, (r - 4) * 2, UI_LINE);
-    cv.drawFastVLine(cx, cy - r + 4, (r - 4) * 2, UI_LINE);
+    // 倾角条
+    int barW = 100;
+    int barX = 132, barY = 106;
+    cv.drawRect(barX, barY, barW, 6, 0x4A69);
+    float t = _roll / 30.0f;
+    if (t > 1) t = 1;
+    if (t < -1) t = -1;
+    cv.fillRect(barX + barW / 2, barY + 1, (int)(t * barW / 2), 4, bubble);
+    cv.drawFastVLine(barX + barW / 2, barY - 1, 8, TFT_WHITE);
 
-    float rad = _panel_angle * (float)M_PI / 180.0f;
-    int ex = cx + (int)((r - 6) * sinf(rad));
-    int ey = cy - (int)((r - 6) * cosf(rad));
-    cv.drawLine(cx, cy, ex, ey, UI_ACCENT);
-    cv.fillCircle(cx, cy, 3, UI_OK);
-    cv.fillCircle(ex, ey, 4, UI_ACCENT);
+    cv.setTextColor(0x7BEF);
+    cv.setCursor(4, 108);
+    cv.print("SPACE 校准归零   G0 返回");
 
-    char buf[16];
-    snprintf(buf, sizeof(buf), "%+.1f°", _panel_angle);
-    cv.setFont(&fonts::efontCN_10_b);
-    cv.setTextColor(UI_SUB);
-    cv.setTextDatum(top_center);
-    cv.drawString(buf, cx, 86);
-    cv.setTextDatum(top_left);
-}
-
-void AppImu::update_panel_angle() {
-    _panel_angle = atan2f(_imu_data.accel.x, _imu_data.accel.y) * 180.0f / (float)M_PI;
+    appCanvasPush(&cv);
 }

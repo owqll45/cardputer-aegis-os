@@ -7,6 +7,7 @@
 #include "esp_crt_bundle.h"
 #include "cJSON.h"
 #include <nvs.h>
+#include <apps/utils/app_canvas.h>
 #include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -20,13 +21,27 @@ static const char* TAG = "DeepSeek";
 
 static portMUX_TYPE s_job_mux = portMUX_INITIALIZER_UNLOCKED;
 
-static const char* kDeepSeekKey   = "YOUR_DEEPSEEK_API_KEY";
+/* API 密钥不入库: 放在同目录的 app_ai_secrets.h(已加入 .gitignore)。
+ * 仓库里只有空默认值, 克隆后需自建该文件才能调用云端接口。 */
+#if defined(__has_include)
+#  if __has_include("app_ai_secrets.h")
+#    include "app_ai_secrets.h"
+#  endif
+#endif
+#ifndef AI_DEEPSEEK_KEY
+#  define AI_DEEPSEEK_KEY ""
+#endif
+#ifndef AI_MIMO_KEY
+#  define AI_MIMO_KEY ""
+#endif
+
+static const char* kDeepSeekKey   = AI_DEEPSEEK_KEY;
 static const char* kDeepSeekBase  = "https://api.deepseek.com";
 static const char* kDeepSeekModel = "deepseek-chat";
 
 static const char* kMimoUrl    = "https://api.xiaomimimo.com/v1/chat/completions";
 static const char* kMimoVoice  = "冰糖";
-static const char* kMimoKeyDefault = "YOUR_MIMO_API_KEY";
+static const char* kMimoKeyDefault = AI_MIMO_KEY;
 
 // 樱花配色（16 位色，8bit 画布会自动量化）
 static const uint16_t C_BG      = 0x1882;
@@ -260,14 +275,8 @@ void AppAI::onOpen()
     GetHAL().display().fillScreen(TFT_BLACK);
 
     _canvas = &GetHAL().canvas();
-    _canvas->deleteSprite();
-    _canvas->setColorDepth(8);
-    _canvas->setPsram(false);
-    // 铺满整个屏幕（135 高），不再让底部留出系统栏的空白
-    if (!_canvas->createSprite(GetHAL().display().width(), GetHAL().display().height())) {
-        _canvas->setPsram(false);
-        _canvas->createSprite(GetHAL().display().width(), 109);
-    }
+    // 铺满整个屏幕（135 高），不再让底部留出系统栏的空白；失败自动降级 109
+    appCanvasBegin(_canvas, getAppInfo().name);
     _W = _canvas->width();
     _H = _canvas->height();
     _canvas_ok = true;
@@ -337,19 +346,14 @@ void AppAI::onRunning()
     // 录音后画布可能因内存碎片只能恢复成 109 高（底部会露出旧画面）；
     // 等内存稳定后每秒重试一次，恢复到整屏 135 高。
     if (_canvas && _canvas_ok && _state != ST_RECORDING &&
-        _canvas->height() < GetHAL().display().height() && now - _last_canvas_retry > 1000) {
+        _canvas->height() < appCanvasTargetH() && now - _last_canvas_retry > 1000) {
         _last_canvas_retry = now;
-        _canvas->deleteSprite();
-        _canvas->setColorDepth(8);
-        _canvas->setPsram(false);
-        if (_canvas->createSprite(GetHAL().display().width(), GetHAL().display().height())) {
-            _W = _canvas->width();
-            _H = _canvas->height();
-            _dirty = true;
-            _lines_dirty = true;
-        } else {
-            _canvas->createSprite(GetHAL().display().width(), 109);
-        }
+        // 画布丢失（录音等场景），统一走画布收口重建；失败会自动降级 109
+        appCanvasBegin(_canvas, getAppInfo().name);
+        _W = _canvas->width();
+        _H = _canvas->height();
+        _dirty = true;
+        _lines_dirty = true;
     }
 
     // 按 V 超过 300ms 才算“按住说话”，短按仍然输入字母 v
@@ -427,10 +431,7 @@ void AppAI::onClose()
     GetHAL().speaker.stop();
 
     if (_canvas) {
-        _canvas->deleteSprite();
-        _canvas->setPsram(false);
-        _canvas->setColorDepth(16);
-        _canvas->createSprite(GetHAL().display().width(), 109);
+        appCanvasRestore(getAppInfo().name);
         _canvas = nullptr;
     }
 }
@@ -621,11 +622,7 @@ void AppAI::releaseCanvasForAsr()
 void AppAI::restoreCanvas()
 {
     if (!_canvas || _canvas_ok) return;
-    _canvas->setColorDepth(8);
-    _canvas->setPsram(false);
-    if (!_canvas->createSprite(GetHAL().display().width(), GetHAL().display().height())) {
-        _canvas->createSprite(GetHAL().display().width(), 109);
-    }
+    appCanvasBegin(_canvas, getAppInfo().name);
     _W = _canvas->width();
     _H = _canvas->height();
     _canvas_ok = true;
@@ -1909,8 +1906,8 @@ void AppAI::drawUI()
     if (_state == ST_SETTINGS) {
         drawSettings();
         // 设置页也要推到屏幕，否则按 Tab 后只会"卡一下"看不到任何变化
-        _canvas->pushSprite(0, 0);
-        if (_H < GetHAL().display().height()) {
+        appCanvasPush(_canvas);
+        if (_H < appCanvasTargetH()) {
             GetHAL().display().fillRect(0, _H, GetHAL().display().width(),
                                         GetHAL().display().height() - _H, C_BG);
         }
@@ -2025,8 +2022,8 @@ void AppAI::drawUI()
         _canvas->print(_toast.c_str());
     }
 
-    _canvas->pushSprite(0, 0);
-    if (_H < GetHAL().display().height()) {
+    appCanvasPush(_canvas);
+    if (_H < appCanvasTargetH()) {
         // 画布只恢复到 109 高时，把底部剩余区域刷成背景，避免露出上一屏残留
         GetHAL().display().fillRect(0, _H, GetHAL().display().width(),
                                     GetHAL().display().height() - _H, C_BG);

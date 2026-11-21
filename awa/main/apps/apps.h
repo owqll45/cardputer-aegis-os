@@ -42,3 +42,11 @@
 // #include "app_brain_server/app_brain_server.h"  // DISABLED: user no longer needs PC AI cluster connection
 #include "app_multimeter/app_multimeter.h"
 #include "app_relay_test/app_relay_test.h"
+#include "app_doudizhu/app_doudizhu.h"
+#include "app_micmeter/app_micmeter.h"
+#include "app_irmote/app_irmote.h"
+#include "app_settings/app_settings.h"
+#include "app_zdmsg/app_zdmsg.h"
+#include "app_whack/app_whack.h"
+#include "app_blackjack/app_blackjack.h"
+#include "app_maze/app_maze.h"

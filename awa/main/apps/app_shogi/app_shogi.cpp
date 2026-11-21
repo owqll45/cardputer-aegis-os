@@ -147,8 +147,10 @@ void AppShogi::onRunning()
     glink_poll();
 
     Keyboard::KeyEvent_t e;
-    while (_keyq.pop(e)) handleKey(e);
-    if (!_canvas) return;  // handleKey 里可能已经 close()
+    while (_keyq.pop(e)) {
+        handleKey(e);
+        if (!_canvas) return;  // handleKey 里可能已经 close()
+    }
 
     // 每帧都发 state 包给 C3 —— onOpen 末尾 drawBoard 发一次,
     // 但玩家回合时 L256 条件成立直接 return, 不会再调 drawBoard,
@@ -172,7 +174,7 @@ void AppShogi::onRunning()
         return;
     }
 
-    if (_game_over || _turn != 2 || _prompt) {
+    if (_game_over || _turn != 2 || _prompt || _two_player) {
         _ai_timer = 0;
         return;
     }
@@ -220,6 +222,23 @@ void AppShogi::handleKey(const Keyboard::KeyEvent_t& e)
         close();
         return;
     }
+
+    // H: 帮助层开关(不改变棋局)
+    if (e.keyCode == KEY_H) {
+        _help = !_help;
+        drawBoard();
+        return;
+    }
+    // M: 单人 / 双人同屏切换
+    if (e.keyCode == KEY_M) {
+        _two_player = !_two_player;
+        _ai_thinking = false;
+        _ai_timer = 0;
+        drawBoard();
+        return;
+    }
+
+    if (_help) return;  // 帮助层打开时只响应 H/ESC, 防止误操作棋盘
 
     // 成子确认（必须显式选择，绝不自动成子）
     if (_prompt) {
@@ -769,7 +788,19 @@ void AppShogi::restoreSnapshot(const Snapshot& s)
 
 void AppShogi::handleEnter()
 {
-    if (_game_over || _turn != 1 || _ai_thinking) return;
+    /* 以前所有"按了没反应"的分支都是直接 return, 玩家分不清是键坏了、
+     * 还是这步不合规。这里统一给一行短提示。 */
+    auto tip = [this](const char* s) {
+        snprintf(_msg, sizeof(_msg), "%s", s);
+        _msg_until = GetHAL().millis() + 1500;
+        drawBoard();
+    };
+
+    if (_game_over) { tip("本局已结束，按 R 重开"); return; }
+    if (_ai_thinking) { tip("AI 正在思考，请稍等"); return; }
+    if (!_two_player && _turn != 1) { tip("等 AI 走完这一手"); return; }  // 单人模式仍只由玩家执下方
+
+    const int side = _turn;  // 双人同屏: 轮到哪方就操作哪方
 
     int r = _cursor_r;
     int c = _cursor_c;
@@ -778,17 +809,22 @@ void AppShogi::handleEnter()
     // ---- 打入模式 ----
     if (_drop_kind > 0) {
         Move m{-1, (int8_t)idx, (uint8_t)_drop_kind, false};
-        if (isLegal(m, 1)) commitMove(m, true);
+        if (isLegal(m, side)) commitMove(m, true);
+        else tip("这里不能打子");
         return;
     }
 
     // ---- 选择自己的棋子 ----
     if (_sel_r < 0) {
         uint8_t v = _board[idx];
-        if (v && ownerOf(v) == 1) {
+        if (v && ownerOf(v) == side) {
             _sel_r = r;
             _sel_c = c;
             drawBoard();
+        } else if (v) {
+            tip("这不是你的子");
+        } else {
+            tip("先选自己的棋子");
         }
         return;
     }
@@ -802,7 +838,7 @@ void AppShogi::handleEnter()
 
     // 选择另一枚自己的棋子
     uint8_t target = _board[idx];
-    if (target && ownerOf(target) == 1) {
+    if (target && ownerOf(target) == side) {
         _sel_r = r;
         _sel_c = c;
         drawBoard();
@@ -811,13 +847,13 @@ void AppShogi::handleEnter()
 
     Move m{(int8_t)(_sel_r * 9 + _sel_c), (int8_t)idx, 0, false};
 
-    if (mayPromote(m, 1)) {
+    if (mayPromote(m, side)) {
         // 先确认这步棋本身合法，再询问是否成子
-        if (!isLegal(m, 1)) return;
+        if (!isLegal(m, side)) { tip("这步走不了"); return; }
         _pending = m;
-        if (mustPromote(m, 1)) {
+        if (mustPromote(m, side)) {
             m.promote = true;
-            if (isLegal(m, 1)) commitMove(m, true);
+            if (isLegal(m, side)) commitMove(m, true);
         } else {
             _prompt = true;
             drawBoard();
@@ -825,8 +861,10 @@ void AppShogi::handleEnter()
         return;
     }
 
-    if (isLegal(m, 1)) {
+    if (isLegal(m, side)) {
         commitMove(m, true);
+    } else {
+        tip("这步走不了");
     }
 }
 
@@ -1077,13 +1115,13 @@ void AppShogi::drawBoard()
         _canvas->fillRect(bx, by, bw, 32, 0x0000);
         _canvas->drawRect(bx, by, bw, 32, TFT_YELLOW);
 
-        _canvas->setFont(&fonts::efontCN_10_b);
+        _canvas->setFont(&fonts::efontCN_10);
         _canvas->setTextDatum(middle_center);
         _canvas->setTextColor(_winner == 1 ? TFT_GREEN : TFT_RED);
         _canvas->drawString(_winner == 1 ? "你赢了" : "AI 获胜", _board_x + _board_w / 2, by + 10);
         _canvas->setTextColor(TFT_WHITE);
         _canvas->drawString("R 重开", _board_x + _board_w / 2, by + 23);
-        _canvas->setFont(&fonts::Font0);
+        _canvas->setFont(&fonts::efontCN_10);
         _canvas->setTextDatum(top_left);
     }
 
@@ -1097,19 +1135,19 @@ void AppShogi::drawBoard()
         _canvas->drawRect(bx, by, bw, 32, TFT_YELLOW);
 
         int cxm = bx + bw / 2;
-        _canvas->setFont(&fonts::efontCN_10_b);
+        _canvas->setFont(&fonts::efontCN_10);
         _canvas->setTextDatum(middle_center);
 
         if (el < 600) {
             _canvas->setTextColor(TFT_GREEN);
             _canvas->drawString("你赢了！", cxm, by + 11);
-            _canvas->setFont(&fonts::Font0);
+            _canvas->setFont(&fonts::efontCN_10);
             _canvas->setTextColor(TFT_WHITE);
             _canvas->drawString("WIN", cxm, by + 24);
         } else if (el < 1200) {
             _canvas->setTextColor(TFT_YELLOW);
             _canvas->drawString("难度提升", cxm, by + 11);
-            _canvas->setFont(&fonts::Font0);
+            _canvas->setFont(&fonts::efontCN_10);
             _canvas->setTextColor(TFT_YELLOW);
             char stars[16];
             int n = (_level < 5) ? _level + 1 : 5;
@@ -1123,11 +1161,46 @@ void AppShogi::drawBoard()
             _canvas->drawString(buf, cxm, by + 13);
         }
 
-        _canvas->setFont(&fonts::Font0);
+        _canvas->setFont(&fonts::efontCN_10);
         _canvas->setTextDatum(top_left);
     }
 
-    _canvas->pushSprite(0, 0);
+    /* 非法操作提示: 棋盘 99 高、画布 121, 棋盘下方正好留一条空白。
+     * 画在帮助层之前, 打开帮助时不会残留。 */
+    if (_msg[0] && (int32_t)(_msg_until - GetHAL().millis()) > 0) {
+        int ty = _board_y + _board_w + 2;
+        if (ty > _canvas->height() - 11) ty = _canvas->height() - 11;
+        _canvas->setFont(&fonts::efontCN_10);
+        int tw = _canvas->textWidth(_msg);
+        int tx = _board_x + (_board_w - tw) / 2;
+        /* 提示条只占 110..120, 不压最后一行的棋子墨迹(墨高约到 109) */
+        _canvas->fillRect(tx - 3, ty, tw + 6, 11, TFT_BLACK);
+        _canvas->drawRect(tx - 3, ty, tw + 6, 11, TFT_YELLOW);
+        _canvas->setTextColor(TFT_YELLOW);
+        _canvas->setCursor(tx, ty + 1);
+        _canvas->print(_msg);
+    }
+
+    if (_help) {
+        /* 帮助是模态层: 棋盘从 y≈2 就开画, 只遮 14 以下会漏出顶行残影, 先整屏铺黑 */
+        _canvas->fillScreen(TFT_BLACK);
+        int bx = 6, by = 14, bw = _canvas->width() - 12, bh = 78;
+        _canvas->fillRect(bx, by, bw, bh, 0x0000);
+        _canvas->drawRect(bx, by, bw, bh, TFT_CYAN);
+        _canvas->drawRect(bx + 1, by + 1, bw - 2, bh - 2, 0x3186);
+        _canvas->setFont(&fonts::efontCN_12);
+        _canvas->setTextDatum(top_left);
+        _canvas->setTextColor(TFT_CYAN);
+        _canvas->drawString("将棋 · 操作帮助", bx + 6, by + 4);
+        _canvas->setTextColor(TFT_WHITE);
+        _canvas->drawString("E/S/A/D 移动  Enter 选/落", bx + 6, by + 18);
+        _canvas->drawString("Z 打入 U 悔棋 R 重开", bx + 6, by + 32);
+        _canvas->drawString("L 难度 M 双人/人机 H 关闭", bx + 6, by + 46);
+        _canvas->setTextColor(TFT_YELLOW);
+        _canvas->drawString("成子可选; 步香桂到底必成", bx + 6, by + 60);
+    }
+
+    appCanvasPush(_canvas);
     sendMirrorState();
 }
 
@@ -1190,13 +1263,16 @@ void AppShogi::drawPiecesAndGrid()
             if (moves[i].from != (int8_t)selIdx) continue;
             int tr = moves[i].to / 9;
             int tc = moves[i].to % 9;
+            /* 深绿点落在棕色棋盘上几乎看不见; 加一圈黑边提高对比 */
             _canvas->fillCircle(_board_x + tc * _cell + _cell / 2,
-                                _board_y + tr * _cell + _cell / 2, 2, 0x0300);
+                                _board_y + tr * _cell + _cell / 2, 3, TFT_BLACK);
+            _canvas->fillCircle(_board_x + tc * _cell + _cell / 2,
+                                _board_y + tr * _cell + _cell / 2, 2, TFT_GREEN);
         }
     }
 
     // 棋子
-    _canvas->setFont(&fonts::efontCN_10_b);
+    _canvas->setFont(&fonts::efontCN_10);
     _canvas->setTextDatum(middle_center);
 
     for (int r = 0; r < 9; r++) {
@@ -1226,14 +1302,19 @@ void AppShogi::drawPiecesAndGrid()
         _canvas->drawString(glyphOf(_drop_kind, 1), cx, cy);
     }
 
-    _canvas->setFont(&fonts::Font0);
+    _canvas->setFont(&fonts::efontCN_10);
     _canvas->setTextDatum(top_left);
 
-    // 光标
-    _canvas->drawRect(_board_x + _cursor_c * _cell, _board_y + _cursor_r * _cell, _cell, _cell, TFT_RED);
+    // 光标(红 1px) 与选中(青 2px 外框): 原来是红框+蓝框两个 1px 框套在一起,
+    // 11px 的格子里几乎分不出"我现在站的"和"我已经选的"。
+    // 选中框画在格子外侧, 不再压住棋子字形。
     if (_sel_r >= 0) {
-        _canvas->drawRect(_board_x + _sel_c * _cell + 1, _board_y + _sel_r * _cell + 1, _cell - 2, _cell - 2, TFT_BLUE);
+        int sx = _board_x + _sel_c * _cell;
+        int sy = _board_y + _sel_r * _cell;
+        _canvas->drawRect(sx - 1, sy - 1, _cell + 2, _cell + 2, TFT_CYAN);
+        _canvas->drawRect(sx - 2, sy - 2, _cell + 4, _cell + 4, TFT_CYAN);
     }
+    _canvas->drawRect(_board_x + _cursor_c * _cell, _board_y + _cursor_r * _cell, _cell, _cell, TFT_RED);
 }
 
 void AppShogi::drawHandsAndStatus()
@@ -1246,13 +1327,13 @@ void AppShogi::drawHandsAndStatus()
     _canvas->setTextDatum(top_left);
 
     // ---- 左侧上方: AI 持驹 ----
-    _canvas->setFont(&fonts::Font0);
-    _canvas->setTextColor(TFT_ORANGE);
+    _canvas->setFont(&fonts::efontCN_10);
+    _canvas->setTextColor(_two_player ? TFT_CYAN : TFT_ORANGE);
     _canvas->setCursor(left_x, 2);
-    _canvas->print("AI");
+    _canvas->print(_two_player ? "2P" : "AI");
 
     int y = 14;
-    _canvas->setFont(&fonts::efontCN_10_b);
+    _canvas->setFont(&fonts::efontCN_10);
     for (int k = PAWN; k <= ROOK; k++) {
         if (_hand[1][k] == 0) continue;
         char buf[24];
@@ -1266,8 +1347,10 @@ void AppShogi::drawHandsAndStatus()
 
     // ---- 左侧下方: 玩家持驹 ----
     int py = h - 24;
+    bool any_hand = false;
     for (int k = ROOK; k >= PAWN; k--) {
         if (_hand[0][k] == 0) continue;
+        any_hand = true;
         char buf[24];
         snprintf(buf, sizeof(buf), "%s%d", glyphOf(k, 1), (int)_hand[0][k]);
         _canvas->setTextColor(0x9FFF);
@@ -1277,18 +1360,29 @@ void AppShogi::drawHandsAndStatus()
         if (py < h / 2) break;
     }
 
-    _canvas->setFont(&fonts::Font0);
+    _canvas->setFont(&fonts::efontCN_10);
     _canvas->setTextColor(0x9FFF);
     _canvas->setCursor(left_x, h - 12);
-    _canvas->print("YOU");
+    _canvas->print(_two_player ? "P2" : "YOU");
+
+    /* 左下角那一列 "兵1 / 香1" 以前没有任何标题, 第一次玩根本不知道是吃到的棋子 */
+    if (any_hand) {
+        _canvas->setTextColor(TFT_DARKGREY);
+        _canvas->setCursor(left_x, py);
+        _canvas->print("持驹");
+        if (py >= 10) {
+            _canvas->setCursor(left_x, py - 10);
+            _canvas->print("Z 打入");
+        }
+    }
 
     // ---- 右侧状态 ----
     int ry = 2;
-    _canvas->setFont(&fonts::efontCN_10_b);
+    _canvas->setFont(&fonts::efontCN_10);
     _canvas->setTextColor(TFT_CYAN);
     _canvas->setCursor(right_x, ry);
     _canvas->print("将棋");
-    _canvas->setFont(&fonts::Font0);
+    _canvas->setFont(&fonts::efontCN_10);
     ry += 12;
 
     _canvas->setTextColor(TFT_WHITE);
@@ -1308,11 +1402,11 @@ void AppShogi::drawHandsAndStatus()
         ry += 10;
     } else if (_turn == 2) {
         _canvas->setTextColor(TFT_RED);
-        _canvas->print(_ai_thinking ? "THINK" : "AI");
+        _canvas->print(_two_player ? "P2回合" : (_ai_thinking ? "AI思考" : "AI回合"));
         ry += 10;
     } else {
         _canvas->setTextColor(TFT_GREEN);
-        _canvas->print("YOUR");
+        _canvas->print(_two_player ? "P1回合" : "轮到你");
         ry += 10;
     }
 
@@ -1326,18 +1420,22 @@ void AppShogi::drawHandsAndStatus()
     if (_drop_kind > 0) {
         _canvas->setTextColor(TFT_YELLOW);
         _canvas->setCursor(right_x, ry);
-        _canvas->setFont(&fonts::efontCN_10_b);
+        _canvas->setFont(&fonts::efontCN_10);
         _canvas->printf("打%s", glyphOf(_drop_kind, 1));
-        _canvas->setFont(&fonts::Font0);
+        _canvas->setFont(&fonts::efontCN_10);
         ry += 10;
     }
 
+    /* 主界面必须写清"怎么走子": 原来只有 [Z]Drp/[U]Undo 这类英文缩写,
+     * 第一次玩的人既不知道方向键是 E/S/A/D, 也不知道 Enter 是选子/落子。 */
     _canvas->setTextColor(TFT_LIGHTGREY);
-    _canvas->setCursor(right_x, ry); _canvas->print("[Z]Drp"); ry += 9;
-    _canvas->setCursor(right_x, ry); _canvas->print("[U]Undo"); ry += 9;
-    _canvas->setCursor(right_x, ry); _canvas->print("[R]New"); ry += 9;
-    _canvas->setCursor(right_x, ry); _canvas->print("[L]Lv"); ry += 9;
-    _canvas->setCursor(right_x, ry); _canvas->print("[X]Clr");
+    /* 行距 11px: 10px 字实际墨高 9~10 行, 原来 9px 行距上下两行会粘在一起 */
+    _canvas->setCursor(right_x, ry); _canvas->print("E/S/A/D 移"); ry += 11;
+    _canvas->setCursor(right_x, ry); _canvas->print("Enter 选/落"); ry += 11;
+    /* 10px 字体里 '[' 会渲染得像 'C', 实机显示成 "CZ]打"; 去掉方括号 */
+    _canvas->setCursor(right_x, ry); _canvas->print("Z 打 U 悔"); ry += 11;
+    _canvas->setCursor(right_x, ry); _canvas->print("R 新 M 双"); ry += 11;
+    _canvas->setCursor(right_x, ry); _canvas->print("H 帮助");
 }
 
 void AppShogi::drawPromotePrompt()
@@ -1349,13 +1447,22 @@ void AppShogi::drawPromotePrompt()
     _canvas->fillRect(bx, by, bw, 30, 0x0000);
     _canvas->drawRect(bx, by, bw, 30, TFT_YELLOW);
 
-    _canvas->setFont(&fonts::efontCN_10_b);
+    _canvas->setFont(&fonts::efontCN_10);
     _canvas->setTextDatum(middle_center);
     _canvas->setTextColor(TFT_YELLOW);
-    _canvas->drawString("是否成子?", _board_x + _board_w / 2, by + 10);
+    /* 只说"是否成子"玩家不知道是哪颗子、变成什么; 补上 兵 成 金? 这类说明 */
+    int kind = 0;
+    if (_pending.from >= 0 && _pending.from < 81) kind = kindOf(_board[(int)_pending.from]);
+    const char* to_name = "金";
+    if (kind == BISHOP) to_name = "马";
+    else if (kind == ROOK) to_name = "龙";
+    char pbuf[24];
+    if (kind > 0) snprintf(pbuf, sizeof(pbuf), "%s 成 %s?", glyphOf(kind, 1), to_name);
+    else snprintf(pbuf, sizeof(pbuf), "是否成子?");
+    _canvas->drawString(pbuf, _board_x + _board_w / 2, by + 10);
     _canvas->setTextColor(TFT_WHITE);
-    _canvas->drawString("Y 成 / N 不成", _board_x + _board_w / 2, by + 22);
-    _canvas->setFont(&fonts::Font0);
+    _canvas->drawString("Y 成子 / N 不变", _board_x + _board_w / 2, by + 22);
+    _canvas->setFont(&fonts::efontCN_10);
     _canvas->setTextDatum(top_left);
 }
 

@@ -1,6 +1,7 @@
 #include "app_function_calculator.h"
 #include <mooncake_log.h>
 #include <hal/hal.h>
+#include <apps/utils/app_canvas.h>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -641,11 +642,15 @@ void AppFunctionCalculator::onOpen()
 {
     mclog::tagInfo(getAppInfo().name, "opened");
 
-    // 使用 DisplayManager 共享画布（240x109）+ pushCanvas()。
-    // 本机无 PSRAM，自建 240x135 精灵会失败回退到 109 高，
-    // 再用 pushSprite(0,0) 会在屏幕底部留下一整条长方形残影。
+    // 共享画布可能带着上一个 app 的 textDatum / 色深 / clipRect, 先走统一入口复位,
+    // 否则光标定位整体偏移, 看起来像"计算器用不了"。
+    GetHAL().display().fillScreen(TFT_BLACK);
+    _canvas = &GetHAL().canvas();
+    appCanvasBegin(_canvas, getAppInfo().name);
+    _canvas->setTextDatum(top_left);
+
     _mode      = 0;
-    _deg       = true;
+    _deg       = false;  // 默认弧度: 图形页 ±10 范围内 sin(x) 才能看出波形; 需要角度按 ` 切换
     _ans       = 0;
     _has_ans   = false;
     _cf.t.clear();
@@ -686,6 +691,7 @@ void AppFunctionCalculator::onOpen()
     _key_event_slot_id = GetHAL().keyboard.onKeyEvent.connect([this](const Keyboard::KeyEvent_t& e) {
         if (!e.state || e.isModifier) return;
 
+        if (e.keyCode == KEY_ESC) { on_esc(); return; }
         if (e.keyCode == KEY_ENTER) { on_enter(); return; }
         if (e.keyCode == KEY_BACKSPACE) { on_backspace(); return; }
         if (e.keyCode == KEY_TAB) { on_tab(); return; }
@@ -703,6 +709,7 @@ void AppFunctionCalculator::onOpen()
 
 void AppFunctionCalculator::onRunning()
 {
+    if (_want_close) { _want_close = false; close(); return; }
     if (GetHAL().goButton().wasClicked()) {
         // 图形编辑中：G0 只取消编辑，不退出应用
         if (_mode == 1 && _g_edit) { _g_edit = false; return; }
@@ -716,7 +723,7 @@ void AppFunctionCalculator::onRunning()
     last = now;
 
     draw();
-    GetHAL().pushCanvas();
+    appCanvasPush(_canvas);
 }
 
 void AppFunctionCalculator::onClose()
@@ -724,6 +731,8 @@ void AppFunctionCalculator::onClose()
     mclog::tagInfo(getAppInfo().name, "closed");
     if (_key_event_slot_id >= 0) GetHAL().keyboard.onKeyEvent.disconnect(_key_event_slot_id);
     _key_event_slot_id = -1;
+    appCanvasRestore(getAppInfo().name);
+    _canvas = nullptr;
 }
 
 // ================= 字段编辑 =================
@@ -872,7 +881,9 @@ void AppFunctionCalculator::on_esc()
         _g_edit = false;
         return;
     }
-    close();
+    // 按键回调在 desktop_task 里, 直接 close() 会和 mooncake 的异步关闭打架;
+    // 置标记, 由 onRunning(本 app 任务上下文) 退出。
+    _want_close = true;
 }
 
 void AppFunctionCalculator::on_arrow(int dir)
@@ -1203,6 +1214,7 @@ void AppFunctionCalculator::calcu_now()
 void AppFunctionCalculator::draw()
 {
     auto& cv = GetHAL().canvas();
+    cv.setTextDatum(top_left);
     cv.fillScreen(TFT_BLACK);
     if (_mode == 0) draw_calc();
     else if (_mode == 1) draw_graph();
@@ -1214,7 +1226,7 @@ void AppFunctionCalculator::draw_topbar(const char* mode_name)
 {
     auto& cv = GetHAL().canvas();
     int w    = cv.width();
-    cv.setFont(&fonts::efontCN_10_b);
+    cv.setFont(&fonts::efontCN_10);
     cv.setTextColor(TFT_YELLOW);
     cv.setCursor(3, 1);
     char mt[32];
@@ -1230,7 +1242,7 @@ void AppFunctionCalculator::draw_topbar(const char* mode_name)
 void AppFunctionCalculator::draw_hint(const char* s)
 {
     auto& cv = GetHAL().canvas();
-    cv.setFont(&fonts::efontCN_10_b);
+    cv.setFont(&fonts::efontCN_10);
     cv.setTextColor(TFT_DARKGREY);
     cv.setCursor(3, cv.height() - 12);
     cv.print(s);
@@ -1288,7 +1300,7 @@ void AppFunctionCalculator::draw_calc()
         char b[40];
         fc_fmt(_ans, b, sizeof(b));
         std::string s = std::string("ANS=") + b;
-        cv.setFont(&fonts::efontCN_10_b);
+        cv.setFont(&fonts::efontCN_10);
         cv.setTextColor(TFT_DARKGREY);
         cv.setCursor(w - 3 - cv.textWidth(s.c_str()) - 34, 1);
         cv.print(s.c_str());
@@ -1326,7 +1338,7 @@ void AppFunctionCalculator::draw_calc()
     cv.setFont(&fonts::efontCN_14);
     int rw = cv.textWidth(rs.c_str());
     if (rw > w - 6) {
-        cv.setFont(&fonts::efontCN_10_b);
+        cv.setFont(&fonts::efontCN_10);
         rw = cv.textWidth(rs.c_str());
     }
     int rx = w - 3 - rw;
@@ -1337,7 +1349,7 @@ void AppFunctionCalculator::draw_calc()
     cv.drawFastHLine(0, 56, w, 0x4208);
 
     // 历史
-    cv.setFont(&fonts::efontCN_10_b);
+    cv.setFont(&fonts::efontCN_10);
     cv.setTextColor(TFT_DARKGREY);
     int hy    = 60;
     int first = (int)_hist.size() - 3;
@@ -1350,7 +1362,7 @@ void AppFunctionCalculator::draw_calc()
         hy += 13;
     }
 
-    draw_hint("Tab=模式 `=度/弧 Enter=计算 上下=历史 G0=退");
+    draw_hint("Tab=模式 `=度/弧 Enter=计算 ↑↓历史 Esc/G0退");
 }
 
 void AppFunctionCalculator::draw_graph()
@@ -1381,7 +1393,7 @@ void AppFunctionCalculator::draw_graph()
     double y_min = _gcy - (cx0 - top) / _gsc;
     double y_max = _gcy + (cx0 - top) / _gsc;
 
-    cv.setFont(&fonts::efontCN_10_b);
+    cv.setFont(&fonts::efontCN_10);
     // 竖直网格线
     for (double gx = ceil(x_min / step) * step; gx <= x_max; gx += step) {
         int sx = (int)(w / 2.0 + (gx - _gcx) * _gsc + 0.5);
@@ -1452,7 +1464,7 @@ void AppFunctionCalculator::draw_graph()
             fc_fmt(x, b1, sizeof(b1));
             fc_fmt(y, b2, sizeof(b2));
             snprintf(bx, sizeof(bx), "x=%s y=%s", b1, b2);
-            cv.setFont(&fonts::efontCN_10_b);
+            cv.setFont(&fonts::efontCN_10);
             int bw = cv.textWidth(bx);
             int bx0 = _tcol + 4 + bw > w ? _tcol - 4 - bw : _tcol + 4;
             cv.setTextColor(TFT_YELLOW);
@@ -1467,7 +1479,7 @@ void AppFunctionCalculator::draw_graph()
 
     // ---- 底部: f(x) 或编辑 ----
     cv.fillRect(0, bot + 1, w, h - bot - 1, TFT_BLACK);
-    cv.setFont(&fonts::efontCN_10_b);
+    cv.setFont(&fonts::efontCN_10);
     if (_g_edit) {
         cv.setTextColor(TFT_CYAN);
         cv.setCursor(3, bot + 2);
@@ -1487,9 +1499,9 @@ void AppFunctionCalculator::draw_graph()
         cv.print(s.c_str());
     }
     // 编辑/操作提示放顶部右侧小字
-    cv.setFont(&fonts::efontCN_10_b);
+    cv.setFont(&fonts::efontCN_10);
     cv.setTextColor(TFT_DARKGREY);
-    const char* gh = _g_edit ? "Enter确认 G0取消" : "Enter改f(x) 方向平移 +-缩放 0复位 t描点";
+    const char* gh = _g_edit ? "Enter确认 Esc/G0退" : "Enter改f(x) 方向平移 +-缩放 0复位 t描点";
     int ghw = cv.textWidth(gh);
     if (ghw < w - 60) {
         cv.setCursor(w - 3 - ghw, 1);
@@ -1521,7 +1533,7 @@ void AppFunctionCalculator::draw_solve()
     }
 
     // 结果
-    cv.setFont(&fonts::efontCN_10_b);
+    cv.setFont(&fonts::efontCN_10);
     int ry = 92;
     for (size_t i = 0; i < _s_res.size() && i < 3; i++) {
         cv.setTextColor(_s_ok ? TFT_GREEN : TFT_RED);
@@ -1537,7 +1549,7 @@ void AppFunctionCalculator::draw_solve()
         cv.print(more);
     }
 
-    draw_hint("上下选框 左右改/换类型 Enter=求解 G0=退");
+    draw_hint("上下选框 左右改/换类型 Enter=求解 Esc/G0退");
 }
 
 void AppFunctionCalculator::draw_calcu()
@@ -1551,7 +1563,7 @@ void AppFunctionCalculator::draw_calcu()
     draw_field(5, 54, "a=", _da, _d_sel == 2, w - 10);
     draw_field(5, 72, "b=", _db, _d_sel == 3, w - 10);
 
-    cv.setFont(&fonts::efontCN_10_b);
+    cv.setFont(&fonts::efontCN_10);
     int ry = 92;
     for (size_t i = 0; i < _d_res.size() && i < 3; i++) {
         cv.setTextColor(i == 2 ? TFT_DARKGREY : (_d_ok ? TFT_GREEN : TFT_RED));
@@ -1560,5 +1572,5 @@ void AppFunctionCalculator::draw_calcu()
         ry += 11;
     }
 
-    draw_hint("上下选框 Enter=求导+积分 Tab=模式 G0=退");
+    draw_hint("上下选框 Enter=求导+积分 Tab=模式 Esc/G0退");
 }

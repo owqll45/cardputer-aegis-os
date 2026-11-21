@@ -62,7 +62,7 @@ void AppClock::render_interface() {
 
     // 系统运行时长
     int64_t up = esp_timer_get_time() / 1000000;
-    cv.setFont(&fonts::efontCN_10_b);
+    cv.setFont(&fonts::efontCN_10);
     cv.setTextColor(0x6B4D);
     snprintf(buf, sizeof(buf), "已运行 %02d:%02d:%02d", (int)((up / 3600) % 100), (int)((up / 60) % 60), (int)(up % 60));
     cv.setTextDatum(top_center);

@@ -13,3 +13,4 @@ extern const uint16_t icon_relay_generated[1600];
 extern const uint16_t icon_clock_generated[1600];
 extern const uint16_t icon_imu_generated[1600];
 extern const uint16_t icon_network_generated[1600];
+extern const uint16_t icon_zdlink_generated[1600];

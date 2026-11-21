@@ -38,6 +38,7 @@ public:
     };
     std::vector<Folder> _folders;
     std::vector<int> _root_apps; // Apps in root
+    int _pinned_app = -1;        // 置顶显示的 app（系统设置），排在桌面最左
     
     bool _in_folder = false;
     int _current_folder_index = -1;
@@ -85,6 +86,11 @@ private:
     uint32_t _last_input_time = 0;
     uint32_t _release_check_time = 0;
     bool _last_key_state = false; // Added to track state
+
+    // 按键延迟测量: 硬件按下时间 → 本帧 pushCanvas 完成
+    uint32_t _key_event_ms = 0;
+    uint32_t _action_ms = 0;
+    bool _latency_pending = false;
     
     // Background stars
     struct Star {

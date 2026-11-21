@@ -111,7 +111,7 @@ void AppDHT11::drawDisplay() {
 
     // 温度卡片
     ui_card(cv, 4, 26, 116, 48);
-    cv.setFont(&fonts::efontCN_10_b);
+    cv.setFont(&fonts::efontCN_10);
     cv.setTextColor(UI_SUB);
     cv.setCursor(10, 29);
     cv.print("温度");
@@ -127,7 +127,7 @@ void AppDHT11::drawDisplay() {
 
     // 湿度卡片
     ui_card(cv, 122, 26, 112, 48);
-    cv.setFont(&fonts::efontCN_10_b);
+    cv.setFont(&fonts::efontCN_10);
     cv.setTextColor(UI_SUB);
     cv.setCursor(128, 29);
     cv.print("湿度");
@@ -142,7 +142,7 @@ void AppDHT11::drawDisplay() {
     cv.print("%");
 
     // 极值 + 趋势
-    cv.setFont(&fonts::efontCN_10_b);
+    cv.setFont(&fonts::efontCN_10);
     cv.setTextColor(UI_SUB);
     snprintf(buf, sizeof(buf), "最高 %.1f°  最低 %.1f°", _max_temp, _min_temp);
     cv.setCursor(8, 80);

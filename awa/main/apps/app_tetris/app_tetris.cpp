@@ -273,7 +273,7 @@ void AppTetris::updateUI() {
         _canvas->setTextDatum(top_left);
     }
     
-    _canvas->pushSprite(0, 0);
+    appCanvasPush(_canvas);
     sendMirrorState();
 }
 

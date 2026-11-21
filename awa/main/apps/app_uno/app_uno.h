@@ -15,7 +15,7 @@ private:
     int _handle_key_event_slot_id = -1;
 
     static const int NP_MAX = 4;
-    static const int HAND_MAX = 24;
+    static const int HAND_MAX = 32;
     static const int TARGET_SCORE = 500;
 
     int _mode = 0;          // 0菜单 1单人AI 2双人联机
@@ -23,6 +23,8 @@ private:
 
     uint8_t _deck[108];
     int _deck_n = 0;
+    uint8_t _discard[108];      // 出过的牌(最后一张=桌面顶牌), 牌堆空了用它重洗
+    int _discard_n = 0;
     uint8_t _hand[NP_MAX][HAND_MAX];
     int _hn[NP_MAX] = { 0 };
     int _np = 2;            // 当前人数(先做2, 留4扩展)
@@ -49,6 +51,9 @@ private:
     uint16_t _btn_prev = 0;
     uint32_t _ai_ms = 0;
     bool _dirty = true;
+    bool _want_close = false;   // ESC 只置标记, 由 onRunning 统一 close(回调里直接关不安全)
+    char _hint[40] = { 0 };     // 出牌被拒等一次性提示(画在底部提示行)
+    uint32_t _hint_until = 0;
 
     // 规则
     static int cardColor(int id) { return id < 100 ? id / 25 + 1 : 0; }
@@ -61,6 +66,7 @@ private:
     bool canPlay(int id) const;
     bool anyPlayable(int p) const;
     void buildDeck();
+    void recycleDiscard();
     void drawCards(int p, int n);
     void startRound();
     void doPlay(int p, int idx);

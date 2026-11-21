@@ -36,3 +36,15 @@ local_ai_cluster/
 persistence/
 esp32_driver/
 meshtastic_src/
+d3/
+
+# 本地私密密钥(不进仓库)
+app_ai_secrets.h
+
+# 本地工具配置 / 取证截图 / 安装包 / 临时采集
+.trae/
+.vscode/
+shots/
+*.apk
+asr_resp.txt
+asr_test.json

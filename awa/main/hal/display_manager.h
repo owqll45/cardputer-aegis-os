@@ -24,6 +24,11 @@ public:
     bool isCanvasValid() const;
     void resetCanvas();
 
+    /* 系统栏叠加层：全局通知条在推屏前画到系统栏画布上（不额外分配画布）。
+     * 用函数指针注册，避免 hal 反向依赖 apps。 */
+    using SystemBarOverlay = void (*)(lgfx::LGFX_Sprite& bar);
+    void setSystemBarOverlay(SystemBarOverlay fn) { _bar_overlay = fn; }
+
     void setEmergencyMode(bool enable) { _is_emergency_mode = enable; }
     bool isEmergencyMode() const { return _is_emergency_mode; }
 
@@ -33,5 +38,6 @@ private:
     lgfx::LGFX_Sprite* _canvas_ui = nullptr;
     lgfx::LGFX_Sprite* _canvas_system_bar = nullptr;
     lgfx::LGFX_Sprite* _canvas_keyboard_bar = nullptr;
+    SystemBarOverlay _bar_overlay = nullptr;
     bool _is_emergency_mode = false;
 };

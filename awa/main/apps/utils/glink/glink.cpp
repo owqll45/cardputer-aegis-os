@@ -1,4 +1,5 @@
 #include "glink.h"
+#include "zdlink.h"
 #include <string.h>
 #include <hal/hal.h>
 #include <esp_now.h>
@@ -39,6 +40,28 @@ static char s_app_name[17] = "Launcher";
 static uint8_t s_game_id = GLINK_GID_LAUNCHER;
 static uint8_t s_icon_id = GLINK_ICON_GENERIC;
 
+// 系统设置里的"无线广播"开关；-1 = 还没从 NVS 读过
+static int8_t s_enabled = -1;
+
+static bool enabled_cached()
+{
+    if (s_enabled < 0) {
+        s_enabled = GetHAL().getSettings().GetBool("glink_on", true) ? 1 : 0;
+    }
+    return s_enabled != 0;
+}
+
+void glink_set_enabled(bool on)
+{
+    s_enabled = on ? 1 : 0;
+    if (!on) {
+        s_ok = false;
+        s_linked = false;
+        s_stash_len = 0;
+        zdlink_set_ready(false);
+    }
+}
+
 static void add_peer(const uint8_t* mac)
 {
     esp_now_peer_info_t p;
@@ -61,26 +84,42 @@ static void send_app_info()
     pkt[4] = s_game_id;
     pkt[5] = s_icon_id;
     strncpy((char*)pkt + 6, s_app_name, 16);
-    esp_now_send(s_peer, pkt, sizeof(pkt));
+    esp_now_send(s_bcast, pkt, sizeof(pkt));   // 广播：所有就近 C3 同帧收到
 }
 
 static void on_recv(const esp_now_recv_info_t* info, const uint8_t* data, int len)
 {
     uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
-    if (s_linked && memcmp(info->src_addr, s_peer, 6) == 0) s_last_rx = now;
+    // 任意 C3 的包都算链路活着：状态改为广播后不再只认一个 peer
+    if (s_linked) s_last_rx = now;
 
-    if (len >= 6 && memcmp(data, "GMKHI1", 6) == 0) {
+    // 同一条 ESP-NOW 链路上的第二套协议: ZD v1(文本/心跳/节点表/ACK)按 magic 分流。
+    // 必须在 GMK* 判断之前, 否则会被当成无关帧丢掉; 两者互不打断。
+    if (len >= 2 && data[0] == 'Z' && data[1] == 'D') {
+        zdlink_on_frame(info, data, len);
+        return;
+    }
+
+    if (len >= 12 && memcmp(data, "GMKPIN2", 7) == 0) {
+        // AA:D0 的延迟探测：原样回传 4 字节时标（广播回，谁测谁认）
+        uint8_t r[12];
+        memcpy(r, "GMKPON2", 7);
+        memcpy(r + 8, data + 8, 4);
+        esp_now_send(s_bcast, r, sizeof(r));
+    } else if (len >= 6 && memcmp(data, "GMKHI1", 6) == 0) {
         if (!s_linked) {
             memcpy(s_peer, info->src_addr, 6);
             add_peer(s_peer);
-            esp_now_send(s_peer, (const uint8_t*)"GMKWELC", 7);
             s_linked = true;
             s_fail = 0;
-            s_last_rx = now;
             ESP_LOGI(TAG, "linked %02x:%02x:%02x:%02x:%02x:%02x",
                      s_peer[0], s_peer[1], s_peer[2], s_peer[3], s_peer[4], s_peer[5]);
-            send_app_info(); // 新连接立刻告知当前 app
         }
+        // 每一台回 GMKHI1 的 C3 都要收到 WELC：界面/镜像现在按广播走
+        if (memcmp(info->src_addr, s_bcast, 6) != 0) add_peer(info->src_addr);
+        esp_now_send(info->src_addr, (const uint8_t*)"GMKWELC", 7);
+        s_last_rx = now;
+        send_app_info(); // 新连接立刻告知当前 app
     } else if (len >= 6 && memcmp(data, "GMKBYE", 6) == 0) {
         if (s_linked && memcmp(info->src_addr, s_peer, 6) == 0) {
             s_linked = false;
@@ -125,12 +164,16 @@ static void send_now(const uint8_t* data, int len)
     if (len > 240) len = 240;
     memcpy(s_tx, data, len);
     s_tx[3] = ++s_seq; // 包序号
-    esp_now_send(s_peer, s_tx, len);
+    esp_now_send(s_bcast, s_tx, len);   // 广播：就近多台 C3 一次覆盖，避免只喂一台
     s_state_last = (uint32_t)(esp_timer_get_time() / 1000);
 }
 
 static void glink_init_internal()
 {
+    // 设置里关掉广播或 WiFi 时不要偷偷把 WiFi 拉起来
+    if (!enabled_cached()) return;
+    if (!GetHAL().getSettings().GetBool("wifi_on", true)) return;
+
     GetHAL().wifiInit(); // STA 已完整启动(幂等, 被 deinit 过也能重新拉起)
     esp_wifi_set_channel(GMK_CH, WIFI_SECOND_CHAN_NONE);
     esp_now_deinit();    // 防御: 残留实例先清掉(未初始化时会报错, 忽略)
@@ -142,6 +185,7 @@ static void glink_init_internal()
     esp_now_register_recv_cb(on_recv);
     esp_now_register_send_cb(on_sent);
     add_peer(s_bcast);
+    zdlink_init();  // ZD v1: 与 GMK 共用同一个 ESP-NOW 实例
     s_ok = true;
     s_linked = false;
     s_stash_len = 0;
@@ -150,6 +194,10 @@ static void glink_init_internal()
 
 void glink_acquire(const char* app_name, uint8_t game_id, uint8_t icon_id)
 {
+    if (!enabled_cached()) {
+        s_ok = false;
+        return;
+    }
     if (app_name && app_name[0]) {
         strncpy(s_app_name, app_name, 16);
         s_app_name[16] = 0;
@@ -179,6 +227,13 @@ void glink_poll()
 {
     uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
 
+    // 广播被设置关掉：立刻停发，不再自动重建
+    if (!enabled_cached()) {
+        s_ok = false;
+        s_linked = false;
+        return;
+    }
+
     // WiFi 被外部 app deinit 的探测: 标记死亡, 不自动重建(省 RAM),
     // 等下个 app glink_acquire 时再拉起
     if (s_ok) {
@@ -189,10 +244,14 @@ void glink_poll()
             s_stash_len = 0;
             s_btn = 0;
             s_rflags = 0;
+            zdlink_set_ready(false);
             ESP_LOGW(TAG, "wifi deinit by app, link down");
         }
     }
     if (!s_ok) return;
+
+    // ZD 心跳/ACK 补发: 不依赖 GMK 是否已成链(广播 peer 初始化后即可收发)
+    zdlink_poll();
 
     if (!s_linked) {
         if (now - s_beacon_last > 500) {
@@ -223,7 +282,7 @@ void glink_poll()
     }
     if (now - s_hb_last > 1000) {
         s_hb_last = now;
-        esp_now_send(s_peer, (const uint8_t*)"GMKBEAT", 7);
+        esp_now_send(s_bcast, (const uint8_t*)"GMKBEAT", 7);
         send_app_info(); // 心跳顺带重发当前 app 信息, C3 一秒内必定同步
     }
 }

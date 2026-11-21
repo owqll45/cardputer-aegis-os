@@ -134,11 +134,8 @@ void AppFPS::onClose() {
         _handle_key_event_slot_id = -1;
     }
     
-    // Restore System Canvas
-    _canvas = &GetHAL().canvas();
-    _canvas->deleteSprite();
-    _canvas->setColorDepth(16);
-    _canvas->createSprite(GetHAL().display().width(), 109);
+    // 统一恢复系统画布（16bpp / 109 高）
+    appCanvasRestore(getAppInfo().name);
     
     _canvas = nullptr;
 }
@@ -163,7 +160,7 @@ void AppFPS::shoot() {
 
             if (transformY > 0) {
                 int spriteScreenX = int((240 / 2) * (1 + transformX / transformY));
-                int spriteWidth = abs(int(135 / (transformY)));
+                int spriteWidth = abs(int(_canvas->height() / (transformY)));
                 
                 // Center pixel is 120
                 if (120 >= spriteScreenX - spriteWidth/2 && 120 <= spriteScreenX + spriteWidth/2) {
@@ -278,7 +275,7 @@ void AppFPS::updateGame() {
         double transformY = invDet * (-_planeY * spriteX + _planeX * spriteY);
         if (transformY > 0) {
             int spriteScreenX = int((240 / 2) * (1 + transformX / transformY));
-            int spriteWidth = abs(int(135 / (transformY)));
+            int spriteWidth = abs(int(_canvas->height() / (transformY)));
             if (120 >= spriteScreenX - spriteWidth/2 && 120 <= spriteScreenX + spriteWidth/2) {
                 _is_aiming_at_enemy = true;
                 break;
@@ -336,7 +333,7 @@ void AppFPS::drawWeapon() {
     int w = 40; // Smaller width
     int h = 50; // Smaller height
     int x = 240 - w - 20; // Right side
-    int y = 135 - h;
+    int y = _canvas->height() - h;
     
     // Recoil
     if (_weapon_frame > 0) {
@@ -361,7 +358,7 @@ void AppFPS::drawWeapon() {
 void AppFPS::drawCrosshair() {
     // Center dot
     int cx = 120;
-    int cy = 67;
+    int cy = _canvas->height() / 2;
     uint16_t color = TFT_RED;
     if (_is_aiming_at_enemy) {
         color = TFT_GREEN; // Invert or change color
@@ -391,16 +388,16 @@ void AppFPS::renderSprites(double* ZBuffer) {
         int spriteScreenX = int((240 / 2) * (1 + transformX / transformY));
 
         // Calculate height of the sprite on screen
-        int spriteHeight = abs(int(135 / (transformY))); // using 'transformY' instead of real distance prevents fisheye
+        int spriteHeight = abs(int(_canvas->height() / (transformY))); // using 'transformY' instead of real distance prevents fisheye
         
         // Calculate lowest and highest pixel to fill in current stripe
-        int drawStartY = -spriteHeight / 2 + 135 / 2;
+        int drawStartY = -spriteHeight / 2 + _canvas->height() / 2;
         if(drawStartY < 0) drawStartY = 0;
-        int drawEndY = spriteHeight / 2 + 135 / 2;
-        if(drawEndY >= 135) drawEndY = 135 - 1;
+        int drawEndY = spriteHeight / 2 + _canvas->height() / 2;
+        if(drawEndY >= _canvas->height()) drawEndY = _canvas->height() - 1;
 
         // Calculate width of the sprite
-        int spriteWidth = abs(int(135 / (transformY)));
+        int spriteWidth = abs(int(_canvas->height() / (transformY)));
         int drawStartX = -spriteWidth / 2 + spriteScreenX;
         if(drawStartX < 0) drawStartX = 0;
         int drawEndX = spriteWidth / 2 + spriteScreenX;
@@ -434,8 +431,9 @@ void AppFPS::renderFrame() {
     if (!_canvas) return;
 
     // Draw Ceiling and Floor
-    _canvas->fillRect(0, 0, 240, 67, 0x3186); // Dark Grey/Blueish
-    _canvas->fillRect(0, 67, 240, 68, 0x738E); // Brownish
+    const int horizon = _canvas->height() / 2;
+    _canvas->fillRect(0, 0, 240, horizon, 0x3186); // Dark Grey/Blueish
+    _canvas->fillRect(0, horizon, 240, _canvas->height() - horizon, 0x738E); // Brownish
 
     for(int x = 0; x < 240; x++) {
         double cameraX = 2 * x / (double)240 - 1; 
@@ -493,12 +491,12 @@ void AppFPS::renderFrame() {
         // ZBuffer for sprites
         _zBuffer[x] = perpWallDist;
 
-        int lineHeight = (int)(135 / perpWallDist);
+        int lineHeight = (int)(_canvas->height() / perpWallDist);
 
-        int drawStart = -lineHeight / 2 + 135 / 2;
+        int drawStart = -lineHeight / 2 + _canvas->height() / 2;
         if(drawStart < 0) drawStart = 0;
-        int drawEnd = lineHeight / 2 + 135 / 2;
-        if(drawEnd >= 135) drawEnd = 135 - 1;
+        int drawEnd = lineHeight / 2 + _canvas->height() / 2;
+        if(drawEnd >= _canvas->height()) drawEnd = _canvas->height() - 1;
 
         // Choose wall color
         uint16_t color;
@@ -534,19 +532,19 @@ void AppFPS::renderFrame() {
     _canvas->setTextSize(1);
     _canvas->setCursor(2, 2);
     _canvas->printf("FPS | Lvl: %d", _level);
-    _canvas->setCursor(2, 125);
+    _canvas->setCursor(2, _canvas->height() - 10);
     _canvas->printf("HP: %d", _player_health);
     
     int enemies_left = 0;
     for(const auto& s : _sprites) if(s.alive) enemies_left++;
-    _canvas->setCursor(180, 125);
+    _canvas->setCursor(180, _canvas->height() - 10);
     _canvas->printf("Enemies: %d", enemies_left);
     
     // Kill Confirm
     if (_show_kill_confirm) {
         _canvas->setTextColor(TFT_RED);
         _canvas->setTextSize(2);
-        _canvas->drawCenterString("ENEMY DOWN", 120, 40, &fonts::Font0);
+        _canvas->drawCenterString("ENEMY DOWN", 120, 40, &fonts::efontCN_10);
     }
     
     // Generating Map Popup
@@ -555,21 +553,21 @@ void AppFPS::renderFrame() {
         _canvas->drawRect(40, 50, 160, 40, TFT_WHITE);
         _canvas->setTextColor(TFT_WHITE);
         _canvas->setTextSize(1);
-        _canvas->drawCenterString("Rendering next map...", 120, 60, &fonts::Font0);
-        _canvas->drawCenterString("Please wait", 120, 75, &fonts::Font0);
+        _canvas->drawCenterString("Rendering next map...", 120, 60, &fonts::efontCN_10);
+        _canvas->drawCenterString("Please wait", 120, 75, &fonts::efontCN_10);
     }
     
     if (_game_over) {
-        _canvas->fillRect(0, 0, 240, 135, TFT_BLACK); // Full screen game over? Or overlay?
+        _canvas->fillRect(0, 0, 240, _canvas->height(), TFT_BLACK); // Full screen game over? Or overlay?
         _canvas->setTextColor(TFT_RED);
         _canvas->setTextSize(2);
-        _canvas->drawCenterString("YOU DIED", 120, 50, &fonts::Font0);
+        _canvas->drawCenterString("YOU DIED", 120, 50, &fonts::efontCN_10);
         _canvas->setTextColor(TFT_WHITE);
         _canvas->setTextSize(1);
-        _canvas->drawCenterString("Press Enter to Restart", 120, 80, &fonts::Font0);
+        _canvas->drawCenterString("Press Enter to Restart", 120, 80, &fonts::efontCN_10);
     }
     
-    _canvas->pushSprite(0, 0);
+    appCanvasPush(_canvas);
     sendMirrorState();
 }
 

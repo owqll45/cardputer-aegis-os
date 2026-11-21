@@ -62,6 +62,9 @@ public:
     inline void pushCanvasSystemBar() { _display_manager.pushSystemBar(); }
     inline void pushCanvasKeyboardBar() { _display_manager.pushKeyboardBar(); }
     inline void pushCanvas() { _display_manager.pushCanvas(); }
+    inline void setSystemBarOverlay(DisplayManager::SystemBarOverlay fn) {
+        _display_manager.setSystemBarOverlay(fn);
+    }
     inline bool isCanvasValid() { return _display_manager.isCanvasValid(); }
     inline void resetCanvas() { _display_manager.resetCanvas(); }
 
@@ -109,6 +112,8 @@ public:
             _clicked = false;
             _pressed = false;
         }
+        /* 自测注入: 与真实 G0 点击走同一把锁存, 应用侧无需改 */
+        void injectClick() { _clicked = true; }
 
     private:
         volatile bool _clicked = false;

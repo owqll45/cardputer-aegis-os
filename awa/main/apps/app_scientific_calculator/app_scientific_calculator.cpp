@@ -1,6 +1,7 @@
 #include "app_scientific_calculator.h"
 #include <mooncake_log.h>
 #include <hal/hal.h>
+#include <apps/utils/app_canvas.h>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -245,7 +246,9 @@ std::string fmt_num(double v)
 // ================= App =================
 AppScientificCalculator::AppScientificCalculator()
 {
-    setAppInfo().name = "Calculator";
+    // 名字必须和 RegisterApp 的注册名一致: appCanvasRestore 会用 fg app 名比对,
+    // 不一致时不会恢复共享画布, 返回桌面就会整块花屏。
+    setAppInfo().name = "SciCalc";
 }
 
 AppScientificCalculator::~AppScientificCalculator() {}
@@ -254,9 +257,14 @@ void AppScientificCalculator::onOpen()
 {
     mclog::tagInfo(getAppInfo().name, "opened");
 
-    // 使用 DisplayManager 共享画布（240x109），每次 pushCanvas() 推屏。
-    // 不要自建 240x135 精灵：本机无 PSRAM，创建会失败并回退到 109 高，
-    // 再用 pushSprite(0,0) 推屏会在屏幕底部留下一整条未刷新的长方形残影。
+    // 共享画布可能是上一个 app 改过的(8bpp / 残留 textDatum / 残留 clipRect)。
+    // 之前这里直接拿 GetHAL().canvas() 画, 继承到 middle_center 等状态后
+    // 光标定位全部偏移, 看上去就是"计算器坏了"。统一走 appCanvasBegin 复位。
+    GetHAL().display().fillScreen(TFT_BLACK);
+    _canvas = &GetHAL().canvas();
+    appCanvasBegin(_canvas, getAppInfo().name);
+    _canvas->setTextDatum(top_left);
+
     _expr.clear();
     _caret     = 0;
     _result    = "0";
@@ -273,6 +281,7 @@ void AppScientificCalculator::onOpen()
     _key_event_slot_id = GetHAL().keyboard.onKeyEvent.connect([this](const Keyboard::KeyEvent_t& e) {
         if (!e.state || e.isModifier) return;
 
+        if (e.keyCode == KEY_ESC) { _want_close = true; return; }
         if (e.keyCode == KEY_ENTER) { evaluate(); return; }
         if (e.keyCode == KEY_BACKSPACE) { backspace(); return; }
         if (e.keyCode == KEY_TAB) {
@@ -302,6 +311,7 @@ void AppScientificCalculator::onOpen()
 
 void AppScientificCalculator::onRunning()
 {
+    if (_want_close) { _want_close = false; close(); return; }
     if (GetHAL().goButton().wasClicked()) { close(); return; }
 
     static uint32_t last = 0;
@@ -310,7 +320,7 @@ void AppScientificCalculator::onRunning()
     last = now;
 
     draw();
-    GetHAL().pushCanvas();
+    appCanvasPush(_canvas);
 }
 
 void AppScientificCalculator::onClose()
@@ -318,6 +328,8 @@ void AppScientificCalculator::onClose()
     mclog::tagInfo(getAppInfo().name, "closed");
     if (_key_event_slot_id >= 0) GetHAL().keyboard.onKeyEvent.disconnect(_key_event_slot_id);
     _key_event_slot_id = -1;
+    appCanvasRestore(getAppInfo().name);
+    _canvas = nullptr;
 }
 
 void AppScientificCalculator::insert_char(char c)
@@ -428,15 +440,15 @@ void AppScientificCalculator::history_down()
 
 void AppScientificCalculator::draw()
 {
-    auto& cv  = GetHAL().canvas();
-    auto* c   = &cv;
+    auto* c = _canvas ? _canvas : &GetHAL().canvas();
     int w     = c->width();
     int h     = c->height();
+    c->setTextDatum(top_left);
 
     c->fillScreen(TFT_BLACK);
 
     // ---- 状态栏 ----
-    c->setFont(&fonts::efontCN_10_b);
+    c->setFont(&fonts::efontCN_10);
     c->setTextColor(_deg ? TFT_CYAN : TFT_ORANGE);
     c->setCursor(3, 1);
     c->print(_deg ? "DEG" : "RAD");
@@ -474,24 +486,24 @@ void AppScientificCalculator::draw()
 
     // ---- 结果(右对齐) ----
     std::string rs = _expr.empty() ? std::string("0") : (_ok ? _result : _err);
-    c->setFont(&fonts::efontCN_14);
+    c->setFont(&fonts::efontCN_12);
     int rw = c->textWidth(rs.c_str());
     if (rw > w - 6) {
-        c->setFont(&fonts::efontCN_10_b);
+        c->setFont(&fonts::efontCN_10);
         rw = c->textWidth(rs.c_str());
     }
     int rx = w - 3 - rw;
     if (rx < 3) rx = 3;
     c->setTextColor(_expr.empty() ? TFT_GREEN : (_ok ? TFT_GREEN : TFT_RED));
-    c->setCursor(rx, 36);
+    c->setCursor(rx, 34);
     c->print(rs.c_str());
-    c->drawFastHLine(0, 56, w, 0x4208);
+    c->drawFastHLine(0, 52, w, 0x4208);
 
     // ---- 历史 ----
-    c->setFont(&fonts::efontCN_10_b);
+    c->setFont(&fonts::efontCN_10);
     c->setTextColor(TFT_DARKGREY);
-    int hy    = 58;
-    int first = (int)_hist.size() - 3;
+    int hy    = 55;
+    int first = (int)_hist.size() - 2;
     if (first < 0) first = 0;
     for (int i = first; i < (int)_hist.size(); i++) {
         std::string line = _hist[i];
@@ -501,7 +513,10 @@ void AppScientificCalculator::draw()
         hy += 13;
     }
 
-    // ---- 底部提示 ----
-    c->setCursor(3, h - 13);
-    c->print("Enter=算 Tab=角度 ↑↓=历史 G0=退");
+    // ---- 底部提示(两行: 按键 + shift 组合) ----
+    c->setTextColor(TFT_DARKGREY);
+    c->setCursor(3, h - 24);
+    c->print("Enter=算 del=退 Tab=DEG/rad ↑↓=历史");
+    c->setCursor(3, h - 12);
+    c->print("shift: 8=* 9=( 0=) ==+ 6=^");
 }

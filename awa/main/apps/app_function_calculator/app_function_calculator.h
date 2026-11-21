@@ -1,5 +1,6 @@
 #pragma once
 #include <mooncake.h>
+#include <M5GFX.h>
 #include <string>
 #include <vector>
 
@@ -32,6 +33,8 @@ private:
     };
 
     int _key_event_slot_id = -1;
+    LGFX_Sprite* _canvas = nullptr;
+    bool _want_close = false;
     int _mode = 0;  // 0 计算 1 图像 2 方程 3 微积分
 
     // ---- 计算模式 ----

@@ -91,6 +91,37 @@ std::string popPending()
     return cmd;
 }
 
+bool takePending(const std::string& cmd)
+{
+    std::lock_guard<std::mutex> lk(s_mutex);
+    for (auto it = s_pending.begin(); it != s_pending.end(); ++it) {
+        if (*it == cmd) {
+            s_pending.erase(it);
+            return true;
+        }
+    }
+    return false;
+}
+
+std::string takePendingPrefix(const std::string& prefix)
+{
+    std::lock_guard<std::mutex> lk(s_mutex);
+    for (auto it = s_pending.begin(); it != s_pending.end(); ++it) {
+        if (it->size() > prefix.size() && it->compare(0, prefix.size(), prefix) == 0) {
+            std::string rest = it->substr(prefix.size());
+            s_pending.erase(it);
+            return rest;
+        }
+    }
+    return "";
+}
+
+std::string peekPending()
+{
+    std::lock_guard<std::mutex> lk(s_mutex);
+    return s_pending.empty() ? std::string() : s_pending.front();
+}
+
 size_t pendingCount()
 {
     std::lock_guard<std::mutex> lk(s_mutex);

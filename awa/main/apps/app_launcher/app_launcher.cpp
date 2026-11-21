@@ -14,6 +14,7 @@
 #include <apps/utils/glink/glink.h>
 #include <esp_system.h>
 #include <esp_heap_caps.h>
+#include <hal/utils/perf.h>
 
 using namespace mooncake;
 
@@ -57,8 +58,9 @@ void Launcher::onCreate()
     start_system_bar();
     // start_keyboard_bar(); // DISABLED: user wants keyboard bar removed
 
-    // ESP-NOW 镜像服务: 开机即广播, C3 在桌面时显示 Launcher 图标+名字
-    glink_acquire("Launcher", GLINK_GID_LAUNCHER, GLINK_ICON_GENERIC);
+    // ESP-NOW 镜像服务: 延后到桌面首帧之后再拉起(见 onRunning),
+    // 避免 WiFi 初始化(~100ms + 42KB)挡住开机第一屏
+    // glink_acquire("Launcher", GLINK_GID_LAUNCHER, GLINK_ICON_GENERIC);
 
     ESP_LOGI("Launcher", "=== DEBUG: desktop free heap = %u KB, min ever = %u KB, largest = %u KB ===",
              (unsigned)(esp_get_free_heap_size() / 1024),
@@ -70,25 +72,33 @@ void Launcher::onCreate()
 
 void Launcher::onRunning()
 {
+    // 性能口径: 桌面帧率 = 每秒完成的 onRunning 次数(含 pushCanvas 的 SPI 传输)
+    static bool s_first_frame = true;
+    static uint32_t s_frames = 0;
+    static uint32_t s_fps_t0 = 0;
+    static uint32_t s_render_us_sum = 0;
+
     // ESP-NOW 全局服务: 信标/心跳/补发/WiFi 存活探测(launcher 常驻 Running, 适合挂这里)
     glink_poll();
 
-    // 优化：降低检测频率，每10帧检测一次
-    static uint32_t check_external_app_counter = 0;
+    // 首帧之后再拉起 ESP-NOW 镜像(此时画面已可见, WiFi 初始化不再挡住开机)
+    static bool s_glink_ready = false;
+    if (!s_glink_ready && _data.running_app_id < 0 && perf_ms() > 2500) {
+        s_glink_ready = true;
+        glink_acquire("Launcher", GLINK_GID_LAUNCHER, GLINK_ICON_GENERIC);
+        perf_boot("glink_ready");
+    }
 
-    // Check if any external app was opened (e.g. via Remote)
+    // Check if any external app was opened (e.g. via Remote / 串口自测)。
+    // 必须每帧查: 之前每 10 帧查一次, 外部拉起的 app 在前几帧会被误判成"桌面",
+    // 于是这里把 app 刚建好的画布 reset 掉(日志 "Canvas invalid, resetting")。
     if (_data.running_app_id == -1) {
-        check_external_app_counter++;
-        if (check_external_app_counter > 10) { // 降频处理
-            check_external_app_counter = 0;
-            
-            auto app_list = GetMooncake().getAppAbilityManager()->getAllAbilityInstance();
-            for (auto& app_raw : app_list) {
-                auto app = static_cast<AppAbility*>(app_raw);
-                if (app->getId() != getId() && GetMooncake().getAppCurrentState(app->getId()) == AppAbility::StateRunning) {
-                    _data.running_app_id = app->getId();
-                    break;
-                }
+        auto app_list = GetMooncake().getAppAbilityManager()->getAllAbilityInstance();
+        for (auto& app_raw : app_list) {
+            auto app = static_cast<AppAbility*>(app_raw);
+            if (app->getId() != getId() && GetMooncake().getAppCurrentState(app->getId()) == AppAbility::StateRunning) {
+                _data.running_app_id = app->getId();
+                break;
             }
         }
     }
@@ -140,8 +150,29 @@ void Launcher::onRunning()
         }
         // else: App is running, do NOT update system bar or keyboard bar
     } else {
+        uint64_t t_begin = esp_timer_get_time();
         update_system_bar();
         update_menu();
+        s_render_us_sum += (uint32_t)(esp_timer_get_time() - t_begin);
+        s_frames++;
+
+        if (s_first_frame) {
+            s_first_frame = false;
+            s_fps_t0 = perf_ms();
+            perf_boot("first_frame");
+        }
+
+        uint32_t now_ms = perf_ms();
+        if (now_ms - s_fps_t0 >= 5000) {
+            float secs = (now_ms - s_fps_t0) / 1000.0f;
+            ESP_LOGI("PERF", "desktop fps=%.1f frames=%u avg_render=%.2fms free=%uKB largest=%uKB",
+                     s_frames / secs, (unsigned)s_frames,
+                     s_frames ? (s_render_us_sum / 1000.0f / s_frames) : 0.0f,
+                     (unsigned)perf_free_kb(), (unsigned)perf_largest_kb());
+            s_frames = 0;
+            s_render_us_sum = 0;
+            s_fps_t0 = now_ms;
+        }
     }
 }
 

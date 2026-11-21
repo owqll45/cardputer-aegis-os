@@ -2,6 +2,7 @@
 #include <mooncake_log.h>
 #include <apps/utils/common.h>
 #include <apps/utils/glink/glink.h>
+#include <apps/utils/app_canvas.h>
 #include <esp_random.h>
 #include <string.h>
 
@@ -15,15 +16,10 @@ AppFlappy::~AppFlappy() {
 }
 
 void AppFlappy::onOpen() {
-    // 本应用自己全屏绘制, 先释放共享画布(52KB)降低内存峰值, 退出时 launcher 会重建
+    // 本应用自己全屏绘制, 先释放共享画布(52KB)降低内存峰值
     GetHAL().canvas().deleteSprite();
     _canvas = new LGFX_Sprite(&GetHAL().display());
-    _canvas->setColorDepth(8);
-    _canvas->setPsram(false);
-    if (!_canvas->createSprite(240, 135)) {
-        mclog::tagError(getAppInfo().name, "Failed to create sprite, fallback");
-        _canvas->createSprite(GetHAL().display().width(), 109);
-    }
+    appCanvasBegin(_canvas, getAppInfo().name);
     resetGame();
     
     _handle_key_event_slot_id = GetHAL().keyboard.onKeyEvent.connect([this](const Keyboard::KeyEvent_t& e) {
@@ -106,6 +102,8 @@ void AppFlappy::onClose() {
     glink_release();
     if(_handle_key_event_slot_id >= 0) GetHAL().keyboard.onKeyEvent.disconnect(_handle_key_event_slot_id);
     if(_canvas) { _canvas->deleteSprite(); delete _canvas; _canvas = nullptr; }
+    // 统一恢复系统画布（16bpp / 109 高）
+    appCanvasRestore(getAppInfo().name);
 }
 
 void AppFlappy::updateUI() {
@@ -131,16 +129,16 @@ void AppFlappy::updateUI() {
     _canvas->setTextColor(TFT_WHITE);
     char score_buf[16];
     snprintf(score_buf, sizeof(score_buf), "%d", _score);
-    _canvas->drawCenterString(score_buf, w / 2, 8, &fonts::Font0);
+    _canvas->drawCenterString(score_buf, w / 2, 8, &fonts::efontCN_10);
     
     if(_game_over) {
         _canvas->setTextColor(TFT_RED);
-        _canvas->drawCenterString("GAME OVER", w / 2, h / 2 - 12, &fonts::Font0);
+        _canvas->drawCenterString("GAME OVER", w / 2, h / 2 - 12, &fonts::efontCN_10);
         _canvas->setTextColor(TFT_WHITE);
-        _canvas->drawCenterString("ENTER: Restart", w / 2, h / 2 + 4, &fonts::Font0);
+        _canvas->drawCenterString("ENTER: Restart", w / 2, h / 2 + 4, &fonts::efontCN_10);
     }
     
-    _canvas->pushSprite(0, 0);
+    appCanvasPush(_canvas);
     sendMirrorState();
 }
 

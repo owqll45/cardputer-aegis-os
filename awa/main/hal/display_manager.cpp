@@ -43,8 +43,11 @@ void DisplayManager::update()
 void DisplayManager::pushSystemBar()
 {
     if (_is_emergency_mode) return;
-    if (_canvas_system_bar && _canvas_keyboard_bar)
+    if (_canvas_system_bar && _canvas_keyboard_bar) {
+        // 全局通知条：推屏前叠加，不额外占画布；退出通知后由注册方自行恢复内容
+        if (_bar_overlay) _bar_overlay(*_canvas_system_bar);
         _canvas_system_bar->pushSprite(0, 0);  // x=0 全屏
+    }
 }
 
 void DisplayManager::pushKeyboardBar()
@@ -69,6 +72,19 @@ void DisplayManager::resetCanvas()
 {
     if (!_display) {
         mclog::tagError("DisplayManager", "resetCanvas called but _display is null!");
+        return;
+    }
+
+    // 复用快路径: 画布规格没变就不删了重建。
+    // 以前每次退 app 都要 delete + create 52KB 主画布和 12KB 系统栏，
+    // 反复开关 app 会把内部堆切碎(最大块 58KB→32KB)并拖慢返回桌面。
+    if (_canvas && _canvas->getBuffer() && _canvas->getColorDepth() == 16 &&
+        _canvas->width() == _display->width() && _canvas->height() == 109 &&
+        _canvas_system_bar && _canvas_system_bar->getBuffer() &&
+        _canvas_system_bar->width() == _display->width() &&
+        _canvas_system_bar->height() == _display->height() - 109) {
+        _canvas->setClipRect(0, 0, _canvas->width(), _canvas->height());
+        _canvas->setPivot(0, 0);
         return;
     }
 

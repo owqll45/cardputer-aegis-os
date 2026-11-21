@@ -1,5 +1,6 @@
 ﻿#include "app_combo.h"
 #include <apps/utils/theme.h>
+#include <apps/utils/app_canvas.h>
 #include <mooncake_log.h>
 #include <hal/hal.h>
 #include <apps/utils/common.h>
@@ -11,9 +12,8 @@ AppCombo::AppCombo() {
 }
 
 AppCombo::~AppCombo() {
-    if (_canvas) {
-        delete _canvas;
-    }
+    /* 画布统一走 HAL 的共享画布(appCanvasBegin), 不能再 delete */
+    _canvas = nullptr;
 }
 
 void AppCombo::onOpen() {
@@ -24,13 +24,9 @@ void AppCombo::onOpen() {
     mclog::tagInfo(getAppInfo().name, "De-initializing WiFi for stability...");
     GetHAL().wifiDeinit();
     
-    _canvas = new LGFX_Sprite(&GetHAL().display());
-    if (!_canvas->createSprite(240, 135)) {
-        mclog::tagError(getAppInfo().name, "Failed to create sprite");
-        delete _canvas;
-        _canvas = nullptr;
-        // Fallback or exit?
-    }
+    /* 和其他全屏 app 一样共用 HAL 画布: 顶部 kInlineH 让给全局内联状态条 */
+    _canvas = &GetHAL().canvas();
+    appCanvasBegin(_canvas, getAppInfo().name);
     
     mclog::tagInfo(getAppInfo().name, "Initing BLE...");
     GetHAL().bleKeyboardInit();
@@ -193,9 +189,8 @@ void AppCombo::onClose() {
     // Let's keep it.
     
     if (_canvas) {
-        _canvas->deleteSprite();
-        delete _canvas;
         _canvas = nullptr;
+        appCanvasRestore(getAppInfo().name);
     }
 }
 
@@ -233,5 +228,5 @@ void AppCombo::updateUI() {
         _canvas->print("Type to send keys");
     }
 
-    _canvas->pushSprite(0, 0);
+    appCanvasPush(_canvas);
 }

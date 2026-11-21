@@ -78,12 +78,18 @@ private:
     Move _last_move{-1, -1, 0, false};
 
     int _level = 1;          // 1..5, starts at 1 star
+    bool _two_player = false; // 双人同屏: 黑白双方都由键盘操作
+    bool _help = false;       // H 键帮助层
     bool _game_over = false;
     int _winner = 0;
     bool _checked = false;
     uint32_t _ai_timer = 0;
     bool _ai_thinking = false;
     int _move_count = 0;
+
+    // 非法操作/没轮到你时的一行提示(画在棋盘下方空白处)
+    char _msg[28] = { 0 };
+    uint32_t _msg_until = 0;
 
     // Win -> level-up transition
     uint32_t _win_anim_start = 0;

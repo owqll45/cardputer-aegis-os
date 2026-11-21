@@ -331,9 +331,8 @@ void AppTank::onClose() {
     if (_handle_key_event_slot_id >= 0) GetHAL().keyboard.onKeyEvent.disconnect(_handle_key_event_slot_id);
     glink_release();
 
-    _canvas = &GetHAL().canvas();
-    _canvas->deleteSprite();
-    _canvas->createSprite(GetHAL().display().width(), 109);
+    // 统一恢复系统画布（16bpp / 109 高）
+    appCanvasRestore(getAppInfo().name);
     _canvas = nullptr;
 }
 
@@ -366,7 +365,7 @@ void AppTank::draw() {
         const char* hs = (glink_remote_flags() & 0x01) ? "手柄已连接" : "手柄未连接";
         _canvas->setCursor((w - _canvas->textWidth(hs)) / 2, h - 20);
         _canvas->print(hs);
-        _canvas->pushSprite(0, 0);
+        appCanvasPush(_canvas);
         return;
     }
 
@@ -441,17 +440,17 @@ void AppTank::draw() {
         _canvas->setCursor(px, 100);
         _canvas->print(_winner == 1 ? "P1 胜!" : "P2 胜!");
         _canvas->setTextColor(TFT_DARKGREY);
-        _canvas->setCursor(px, 114);
+        _canvas->setCursor(px, 108);
         _canvas->print("Enter重开");
     } else {
         _canvas->setTextColor(TFT_DARKGREY);
         _canvas->setCursor(px, 100);
         _canvas->print("先5杀胜");
-        _canvas->setCursor(px, 114);
+        _canvas->setCursor(px, 108);
         _canvas->print("ESAD+Enter");
     }
 
-    _canvas->pushSprite(0, 0);
+    appCanvasPush(_canvas);
 }
 
 // TANKSTATE 0x23 (59B)

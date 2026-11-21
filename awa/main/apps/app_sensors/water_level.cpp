@@ -48,13 +48,10 @@ WaterLevelSensor::~WaterLevelSensor() {
 bool WaterLevelSensor::init() {
     if (_initialized) return true;
 
-    adc_oneshot_unit_init_cfg_t init_config = {
-        .unit_id = ADC_UNIT_1,
-        .clk_src = ADC_RTC_CLK_SRC_DEFAULT,
-        .ulp_mode = ADC_ULP_MODE_DISABLE,
-    };
-    
-    esp_err_t ret = adc_oneshot_new_unit(&init_config, &_adc_handle);
+    // 板上电池采样已占用 ADC1 单元, 自己再 new_unit 必然失败并刷错误日志。
+    // 直接复用 M5.Power 的共享单元, 只加一个通道配置。
+    _adc_handle = M5.Power.getAdcOneShotHandle();
+    esp_err_t ret = (_adc_handle != nullptr) ? ESP_OK : ESP_FAIL;
     if (ret != ESP_OK) {
         // 如果 ADC 单元被占用（adc1 is already in use），我们切换到 GPIO Fallback 模式
         // 尝试用普通 GPIO 读取高低电平来“模拟”有水/无水

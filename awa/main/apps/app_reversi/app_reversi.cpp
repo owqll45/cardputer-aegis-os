@@ -297,9 +297,8 @@ void AppReversi::onClose() {
     if (_handle_key_event_slot_id >= 0) GetHAL().keyboard.onKeyEvent.disconnect(_handle_key_event_slot_id);
     glink_release();
 
-    _canvas = &GetHAL().canvas();
-    _canvas->deleteSprite();
-    _canvas->createSprite(GetHAL().display().width(), 109);
+    // 统一恢复系统画布（16bpp / 109 高）
+    appCanvasRestore(getAppInfo().name);
     _canvas = nullptr;
 }
 
@@ -332,7 +331,7 @@ void AppReversi::draw() {
         const char* hs = (glink_remote_flags() & 0x01) ? "手柄已连接" : "手柄未连接";
         _canvas->setCursor((w - _canvas->textWidth(hs)) / 2, h - 20);
         _canvas->print(hs);
-        _canvas->pushSprite(0, 0);
+        appCanvasPush(_canvas);
         return;
     }
 
@@ -417,7 +416,7 @@ void AppReversi::draw() {
         }
     }
 
-    _canvas->pushSprite(0, 0);
+    appCanvasPush(_canvas);
 }
 
 // RVSTATE: 'G','M',0x22,seq | 4-19 棋盘64格x2bit | 20 cursorX | 21 cursorY

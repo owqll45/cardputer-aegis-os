@@ -1,4 +1,6 @@
 #include "network_manager.h"
+#include "../hal_config.h"
+#include "utils/ir_nec/ir_helper.h"
 #include <mooncake_log.h>
 #include <M5Unified.hpp>
 #include <esp_wifi.h>
@@ -542,13 +544,20 @@ void NetworkManager::espNowClearReceivedData()
 /* -------------------------------------------------------------------------- */
 void NetworkManager::irInit()
 {
-    mclog::tagInfo(_tag, "ir init");
+    if (_is_ir_inited) {
+        return;
+    }
+    mclog::tagInfo(_tag, "ir init on GPIO{}", HAL_PIN_IR_TX);
+    ir_helper_init((gpio_num_t)HAL_PIN_IR_TX);
     _is_ir_inited = true;
 }
 
 void NetworkManager::irSend(uint8_t addr, uint8_t cmd)
 {
-    /* Implement IR send logic */
+    if (!_is_ir_inited) {
+        irInit();
+    }
+    ir_helper_send(addr, cmd);
 }
 
 /* -------------------------------------------------------------------------- */

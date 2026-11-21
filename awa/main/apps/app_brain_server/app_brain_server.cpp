@@ -295,7 +295,7 @@ void AppBrainServer::_update_ui() {
 
     // Memory/Feature Warning
     if (!GetHAL().isWifiConnected() && _current_hr == 0) {
-        M5.Display.setFont(&fonts::efontCN_10_b);
+        M5.Display.setFont(&fonts::efontCN_10);
         M5.Display.setTextColor(TFT_RED, TFT_BLACK);
         M5.Display.drawCenterString("内存不足: 心率已关闭 (请尝试连接Wi-Fi)", 120, 128);
     }

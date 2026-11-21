@@ -159,8 +159,12 @@ int32_t Settings::GetInt(const std::string& key, int32_t default_value)
 
 void Settings::SetInt(const std::string& key, int32_t value)
 {
-    if (read_write_) {
-        ESP_ERROR_CHECK(nvs_set_i32(nvs_handle_, key.c_str(), value));
+    if (read_write_ && nvs_handle_ != 0) {
+        esp_err_t err = nvs_set_i32(nvs_handle_, key.c_str(), value);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "nvs_set_i32(%s) failed: %s", key.c_str(), esp_err_to_name(err));
+            return;
+        }
         sd_settings_[key] = std::to_string(value);
         dirty_ = true;
     } else {
@@ -191,8 +195,12 @@ bool Settings::GetBool(const std::string& key, bool default_value)
 
 void Settings::SetBool(const std::string& key, bool value)
 {
-    if (read_write_) {
-        ESP_ERROR_CHECK(nvs_set_u8(nvs_handle_, key.c_str(), value ? 1 : 0));
+    if (read_write_ && nvs_handle_ != 0) {
+        esp_err_t err = nvs_set_u8(nvs_handle_, key.c_str(), value ? 1 : 0);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "nvs_set_u8(%s) failed: %s", key.c_str(), esp_err_to_name(err));
+            return;
+        }
         sd_settings_[key] = value ? "1" : "0";
         dirty_ = true;
     } else {
@@ -216,8 +224,12 @@ void Settings::EraseKey(const std::string& key)
 
 void Settings::EraseAll()
 {
-    if (read_write_) {
-        ESP_ERROR_CHECK(nvs_erase_all(nvs_handle_));
+    if (read_write_ && nvs_handle_ != 0) {
+        esp_err_t err = nvs_erase_all(nvs_handle_);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "nvs_erase_all failed: %s", esp_err_to_name(err));
+            return;
+        }
         sd_settings_.clear();
         dirty_ = true;
     } else {

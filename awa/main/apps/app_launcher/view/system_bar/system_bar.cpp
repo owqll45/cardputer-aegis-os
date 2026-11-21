@@ -4,21 +4,18 @@
  * SPDX-License-Identifier: MIT
  */
 #include "../../app_launcher.h"
-#include <mooncake_log.h>
-#include <apps/utils/theme.h>
-#include <apps/utils/common.h>
-#include <esp_system.h>
-#include <esp_heap_caps.h>
+#include <apps/utils/ui_sysbar/ui_sysbar.h>
+#include <hal/hal.h>
 
-#include "assets/bat1.h"
-#include "assets/bat2.h"
-#include "assets/bat3.h"
-#include "assets/bat4.h"
-#include "assets/wifi1.h"
-#include "assets/wifi2.h"
-#include "assets/wifi3.h"
-#include "assets/wifi4.h"
-#include "assets/wifi5.h"
+/* 桌面顶栏不再由 Launcher 自绘。
+ *
+ * 以前这里画的是另一套 240x26 顶栏(矩阵雨 + MEM + WiFi 格), 而全局 ui_sysbar 的
+ * overlay 也会往同一块 canvasSystemBar 上画统一栏(E 青/L 橙 + 时间 + 电量)。
+ * 两个绘制者轮流覆盖: ui_sysbar 只在数据变脏时画, 其余时候推的是 Launcher 刚画的内容,
+ * 表现为桌面顶栏两套来回闪、换栏瞬间出现中间态。
+ *
+ * 现在唯一绘制者是 ui_sysbar::draw_status(由 pushCanvasSystemBar 内的 overlay 触发):
+ * Launcher 只请求"重画 + 推屏", 保证桌面上永远只有一条栏, 且与 app 内是同一套。 */
 
 void Launcher::start_system_bar()
 {
@@ -27,6 +24,8 @@ void Launcher::start_system_bar()
 
 void Launcher::update_system_bar()
 {
+    /* 1Hz 看门狗重推: 正常情况下 ui_sysbar 只在链路/电量/分钟变化时重画,
+     * 这里兜底一次, 保证时钟跳分钟、链路 E/L 切换后桌面会跟上。 */
     if ((GetHAL().millis() - _data.system_bar_update_count) > _data.system_bar_update_period) {
         render_system_bar();
         _data.system_bar_update_count = GetHAL().millis();
@@ -35,110 +34,8 @@ void Launcher::update_system_bar()
 
 void Launcher::render_system_bar()
 {
-    // Update state
-    _data.system_state.wifi_state = GetHAL().isWifiConnected() ? 1 : 4;
-
-    // Time
-    static time_t now;
-    static struct tm timeinfo;
-    time(&now);
-    localtime_r(&now, &timeinfo);
-    _data.system_state.time = fmt::format("{:02d}:{:02d}", timeinfo.tm_hour, timeinfo.tm_min);
-
-    // Bat
-    if ((GetHAL().millis() - _data.bat_update_time_count) > 5000 || _data.bat_update_time_count == 0) {
-        auto bat_level               = GetHAL().getBatLevel();
-        _data.system_state.bat_level = fmt::format("{}", bat_level);
-        _data.bat_update_time_count = GetHAL().millis();
-    }
-
-    // Background - Tech Header
-    GetHAL().canvasSystemBar().fillScreen(TFT_BLACK);
-    
-    // Matrix Rain Effect (Subtle)
-    GetHAL().canvasSystemBar().setTextColor(GetHAL().canvasSystemBar().color565(20, 40, 20));
-    GetHAL().canvasSystemBar().setFont(&fonts::Font0);
-    static int offset = 0;
-    offset++;
-    for(int i=0; i<240; i+=10) {
-        if ((i + offset) % 30 < 10) 
-            GetHAL().canvasSystemBar().drawFastVLine(i, 0, 10, 0x18E3); // Dark Green
-    }
-
-    // Neon Bottom Line
-    GetHAL().canvasSystemBar().drawFastHLine(0, GetHAL().canvasSystemBar().height()-1, 240, 0x07E0); // Green
-
-    // --- LEFT: TIME ---
-    GetHAL().canvasSystemBar().setFont(&fonts::Font2); // Larger, clean font
-    GetHAL().canvasSystemBar().setTextColor(TFT_WHITE, TFT_BLACK);
-    GetHAL().canvasSystemBar().setCursor(4, 2);
-    GetHAL().canvasSystemBar().print(_data.system_state.time.c_str());
-
-    // --- CENTER: RAM ---
-    uint32_t free_heap = esp_get_free_heap_size();
-    GetHAL().canvasSystemBar().setFont(&fonts::Font0);
-    GetHAL().canvasSystemBar().setTextColor(TFT_CYAN, TFT_BLACK);
-    GetHAL().canvasSystemBar().setCursor(90, 6);
-    GetHAL().canvasSystemBar().printf("MEM:%ldK", free_heap/1024);
-
-    // --- RIGHT: STATUS ICONS（电池贴最右侧）---
-    int right_x = GetHAL().canvasSystemBar().width() - 2;
-
-    // Mute Icon
-    if (_data.system_state.is_muted) {
-        // Draw mute icon (simple X)
-        GetHAL().canvasSystemBar().drawLine(right_x - 30, 4, right_x - 20, 14, TFT_RED);
-        GetHAL().canvasSystemBar().drawLine(right_x - 30, 14, right_x - 20, 4, TFT_RED);
-    }
-
-    // 1. BATTERY (Drawn)
-    // Fix: bat_level might be empty string initially
-    int bat_val = 0;
-    if (!_data.system_state.bat_level.empty()) {
-        bat_val = atoi(_data.system_state.bat_level.c_str());
-    }
-    
-    int bat_w = 20; // Slightly smaller
-    int bat_h = 10;
-    int bat_x = right_x - bat_w;
-    int bat_y = 4;
-    
-    // Battery Body
-    GetHAL().canvasSystemBar().drawRect(bat_x, bat_y, bat_w, bat_h, TFT_WHITE);
-    GetHAL().canvasSystemBar().fillRect(bat_x + bat_w, bat_y + 2, 2, 6, TFT_WHITE); // Nipple
-    
-    // Battery Fill
-    int fill_w = (bat_w - 4) * bat_val / 100;
-    uint16_t bat_color = TFT_GREEN;
-    if (bat_val < 20) bat_color = TFT_RED;
-    else if (bat_val < 50) bat_color = TFT_YELLOW;
-    
-    // Solid fill for visibility
-    if (fill_w > 0)
-        GetHAL().canvasSystemBar().fillRect(bat_x + 2, bat_y + 2, fill_w, bat_h - 4, bat_color);
-    
-    // Battery Text (Left of battery)
-    GetHAL().canvasSystemBar().setFont(&fonts::Font0);
-    GetHAL().canvasSystemBar().setTextColor(bat_color, TFT_BLACK);
-    GetHAL().canvasSystemBar().setCursor(bat_x - 25, 6); // Move text left
-    GetHAL().canvasSystemBar().printf("%d%%", bat_val);
-
-    // 2. WIFI (Drawn)
-    int wifi_x = bat_x - 40; // Move left from battery text
-    int wifi_y = 4;
-    
-    if (_data.system_state.wifi_state != 4) { // Not OFF
-        // Draw signal bars (stairs)
-        GetHAL().canvasSystemBar().fillRect(wifi_x, wifi_y+8, 2, 2, TFT_DARKGREY);
-        GetHAL().canvasSystemBar().fillRect(wifi_x+3, wifi_y+6, 2, 4, TFT_DARKGREY);
-        GetHAL().canvasSystemBar().fillRect(wifi_x+6, wifi_y+4, 2, 6, TFT_DARKGREY);
-        GetHAL().canvasSystemBar().fillRect(wifi_x+9, wifi_y+0, 2, 10, TFT_GREEN); // Active bar
-    } else {
-        // Draw X
-        GetHAL().canvasSystemBar().setTextColor(TFT_RED, TFT_BLACK);
-        GetHAL().canvasSystemBar().drawString("X", wifi_x, 6);
-    }
-
-    // Push
+    /* 换屏/通知结束/画布重建后, 系统栏画布里的内容可能是旧的, 必须让 ui_sysbar 重画。
+     * invalidate() 只置脏, 真正的绘制在 pushCanvasSystemBar → overlay 里完成。 */
+    ui_sysbar::invalidate();
     GetHAL().pushCanvasSystemBar();
 }

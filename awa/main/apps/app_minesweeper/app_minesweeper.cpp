@@ -34,6 +34,8 @@ void AppMinesweeper::onOpen() {
     });
 
     glink_acquire("Minesweeper", GLINK_GID_MINESWEEPER, GLINK_ICON_MINESWEEPER);
+
+    updateUI();  // 首帧: 不然开进来只有顶栏, 棋盘要等第一次按键才画
 }
 
 // app 任务里处理按键（onRunning 消费队列），这里绘制才安全
@@ -171,6 +173,8 @@ void AppMinesweeper::onClose() {
     if(_handle_key_event_slot_id >= 0) GetHAL().keyboard.onKeyEvent.disconnect(_handle_key_event_slot_id);
     _handle_key_event_slot_id = -1;
     if(_canvas) { _canvas->deleteSprite(); delete _canvas; _canvas = nullptr; }
+    // 统一恢复系统画布（16bpp / 109 高）
+    appCanvasRestore(getAppInfo().name);
 }
 
 void AppMinesweeper::updateUI() {
@@ -235,7 +239,7 @@ void AppMinesweeper::updateUI() {
         _canvas->drawString("First click is safe", 90, 2);
     }
     
-    _canvas->pushSprite(0, 0);
+    appCanvasPush(_canvas);
     sendMirrorState();
 }
 

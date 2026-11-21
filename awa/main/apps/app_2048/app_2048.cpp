@@ -362,7 +362,7 @@ void App2048::drawBoard() {
             if (val > 0) {
                 _canvas->setTextColor(textColor);
                 _canvas->setTextSize(1);
-                _canvas->setFont(&fonts::Font0);
+                _canvas->setFont(&fonts::efontCN_10);
                 
                 // Center text
                 char str[16];
@@ -376,18 +376,18 @@ void App2048::drawBoard() {
     
     // UI Info
     _canvas->setTextColor(TFT_WHITE);
-    _canvas->setFont(&fonts::Font0);
+    _canvas->setFont(&fonts::efontCN_10);
     _canvas->setCursor(5, 5);
     _canvas->printf("Score: %d", _score);
     
     if (_game_over) {
         _canvas->setTextColor(TFT_RED);
-        _canvas->drawCenterString("GAME OVER", _canvas->width() / 2, 5, &fonts::Font0);
-        _canvas->drawCenterString("[R] Restart", _canvas->width() / 2, _canvas->height() - 15, &fonts::Font0);
+        _canvas->drawCenterString("GAME OVER", _canvas->width() / 2, 5, &fonts::efontCN_10);
+        _canvas->drawCenterString("[R] Restart", _canvas->width() / 2, _canvas->height() - 15, &fonts::efontCN_10);
     } else if (_win) {
         _canvas->setTextColor(TFT_YELLOW);
-        _canvas->drawCenterString("YOU WIN", _canvas->width() / 2, 5, &fonts::Font0);
+        _canvas->drawCenterString("YOU WIN", _canvas->width() / 2, 5, &fonts::efontCN_10);
     }
     
-    _canvas->pushSprite(0, 0);
+    appCanvasPush(_canvas);
 }

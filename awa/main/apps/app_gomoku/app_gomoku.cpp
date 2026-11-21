@@ -1,5 +1,6 @@
 #include "app_gomoku.h"
 #include <apps/utils/glink/glink.h>
+#include <apps/utils/app_canvas.h>
 #include <apps/utils/theme.h>
 #include <mooncake_log.h>
 #include <hal/hal.h>
@@ -35,6 +36,9 @@ static Keyboard::KeyEvent_t s_keyq[KEY_QN];
 static volatile int s_key_head = 0;
 static volatile int s_key_tail = 0;
 static portMUX_TYPE s_key_mux = portMUX_INITIALIZER_UNLOCKED;
+
+// 落子被拒时的一行提示（点已有子），下一帧重绘时显示
+static uint32_t s_cell_tip_until = 0;
 
 // ================= 基础常量 =================
 
@@ -239,6 +243,44 @@ static const char* kTauntCaughtNo[][2] = {
 static const int kTauntCaughtYesN = (int)(sizeof(kTauntCaughtYes) / sizeof(kTauntCaughtYes[0]));
 static const int kTauntCaughtNoN  = (int)(sizeof(kTauntCaughtNo) / sizeof(kTauntCaughtNo[0]));
 
+// 场面嘴炮：被堵 / 快赢 / 快输（右栏只有 64px, 每行最多 5 字）
+static const char* kTauntBlocked[][2] = {
+    { "堵得住？", "下一手呢" },
+    { "算你看穿", "也救不了" },
+    { "有点意思", "但没用" },
+    { "挺会挡嘛", "继续啊" },
+    { "挡这有屁用", "满盘是坑" },
+    { "手挺快", "脑子慢" },
+    { "就防这？", "太嫩了" },
+};
+static const char* kTauntNearWin[][2] = {
+    { "看到杀没", "该投降了" },
+    { "下一步死", "数着吧" },
+    { "挡不住的", "两条线" },
+    { "准备认输", "别挣扎" },
+    { "这还下？", "早点投" },
+    { "死棋了", "还走呢" },
+};
+static const char* kTauntDanger[][2] = {
+    { "你赢了？", "想得美" },
+    { "不可能！", "给我等着" },
+    { "别得意", "我认真了" },
+    { "逼我是吧", "来真的" },
+    { "有点东西", "再来" },
+    { "气死我了", "看招" },
+};
+static const int kTauntBlockedN = (int)(sizeof(kTauntBlocked) / sizeof(kTauntBlocked[0]));
+static const int kTauntNearWinN = (int)(sizeof(kTauntNearWin) / sizeof(kTauntNearWin[0]));
+static const int kTauntDangerN = (int)(sizeof(kTauntDanger) / sizeof(kTauntDanger[0]));
+
+// 作弊问责条里随机挑一句骂（10px 字体, 最多 6 字）
+static const char* kCheatAsk[] = {
+    "又偷子？", "手脚不干净", "棋盘长了手？", "要不要脸啊",
+    "偷得挺熟练", "当我瞎吗", "这手哪来的", "你作弊吧",
+    "不承认也没用", "脸呢？",
+};
+static const int kCheatAskN = (int)(sizeof(kCheatAsk) / sizeof(kCheatAsk[0]));
+
 static const char* kTauntWin[][3] = {
     { "人类就这", "棋力堪忧", "别玩了" },
     { "算力碾压", "差距太大", "滚去练" },
@@ -268,6 +310,14 @@ AppGomoku::~AppGomoku() {
 void AppGomoku::onOpen() {
     mclog::tagInfo(getAppInfo().name, "Application opened");
 
+    /* 同一个实例被再次 open 时, 必须先把上一次的键盘回调摘掉。
+     * 否则会同时挂着两个回调, 一个按键被入队两次 → 方向键/难度键全部双份执行
+     * (实测: 连按 6 次 L 难度从 Lv.1 跳到 Lv.3, 因为加档加了两遍)。 */
+    if (_handle_key_event_slot_id >= 0) {
+        GetHAL().keyboard.onKeyEvent.disconnect(_handle_key_event_slot_id);
+        _handle_key_event_slot_id = -1;
+    }
+
     GetHAL().display().fillScreen(TFT_BLACK);
 
     _canvas = &GetHAL().canvas();
@@ -280,17 +330,23 @@ void AppGomoku::onOpen() {
     // 会降级成 240x109, 底部 26 行不被 pushSprite 覆盖 → 画面像被"划了一刀"。
     // 这里改用普通内部 RAM 自申请整屏缓冲, 用 setBuffer 绑定, 保证全高。
     int panel_w = GetHAL().display().width();
-    int panel_h = GetHAL().display().height();
+    /* 顶部 ui_sysbar::kInlineH(14px) 是全局内联状态条, 属于画面排版的一部分,
+     * 棋盘/信息栏从它下面开始画, 不再被系统栏盖住 */
+    int panel_h = GetHAL().display().height() - ui_sysbar::kInlineH;
     if (!_fb) {
         _fb = (uint8_t*)heap_caps_malloc((size_t)panel_w * panel_h, MALLOC_CAP_8BIT);
     }
     if (_fb) {
         _canvas->setBuffer(_fb, panel_w, panel_h);
+        /* setBuffer 绕过了 appCanvasBegin, 必须手动登记, 否则 ui_sysbar 认为
+         * 前台没有全屏画布 → 顶栏不画、26px 系统栏又开始每帧往画面上盖 */
+        ui_sysbar::noteAppCanvas(_canvas, panel_h);
         ESP_LOGI("GOMOKU", "canvas full %dx%d fb=%p heap=%u",
                  panel_w, panel_h, _fb, (unsigned)esp_get_free_heap_size());
     } else {
         mclog::tagError(getAppInfo().name, "Failed to create sprite, fallback");
         _canvas->createSprite(panel_w, 109);
+        ui_sysbar::noteAppCanvas(_canvas, (int)_canvas->height());
         ESP_LOGW("GOMOKU", "canvas fallback %dx%d",
                  (int)_canvas->width(), (int)_canvas->height());
     }
@@ -374,6 +430,12 @@ void AppGomoku::onOpen() {
                     keyEvent.keyCode == KEY_M || keyEvent.keyCode == KEY_L ||
                     keyEvent.keyCode == KEY_T) return;
                 if (_current_player != 1 && keyEvent.keyCode != KEY_C) return; // 轮到对方
+            }
+
+            // 结算面板: 玩家一按键就取消"自动进下一局", 免得手在看战报时被强行开新局
+            if (_result_visible && _next_game_ms) {
+                _next_game_ms = 0;
+                drawBoard();
             }
 
             if (keyEvent.keyCode == KEY_H) {
@@ -483,6 +545,7 @@ void AppGomoku::onOpen() {
             // 难度 1..10 循环，换难度直接开新局
             if (keyEvent.keyCode == KEY_L) {
                 _difficulty = (_difficulty % 10) + 1;
+                ESP_LOGI("GOMOKU", "difficulty key -> lv=%d", _difficulty);
                 resetGame();
                 drawBoard();
                 return;
@@ -599,22 +662,8 @@ void AppGomoku::onRunning() {
         s_prev_link = lk;
     }
 
-    // ---- 胜负动画 ----
-    if (_win_anim_active) {
-        uint32_t el = GetHAL().millis() - _win_anim_start;
-        if (el >= 1800) {
-            _win_anim_active = false;
-            if (_level_up_pending) {
-                _level_up_pending = false;
-                if (_difficulty < 10) _difficulty++;
-                resetGame();
-            }
-            drawBoard();
-        } else if ((el / 120) % 2 == 0 || el > 600) {
-            drawBoard();
-        }
-        return;
-    }
+    // ---- 终局不再自动开新局: 由 2.2s 后的结算面板接手(见下方 _result_visible),
+    //      赢/输都停在面板上, 棋盘与棋谱保留, 可按 V 回看、R 重开。
 
     // ---- 作弊问责: 冻结 1.5 秒后弹出选择题 ----
     if (_cheat_alert == 1 && now - _cheat_freeze_ms >= 1500) {
@@ -640,13 +689,9 @@ void AppGomoku::onRunning() {
         }
     }
 
-    // 平局:显示 DRAW 1.8 秒后自动开新局(联机对战要双方确认, 不自动开)
-    // 智力测试下平局也停在结算面板, 否则玩家看不到评估结果
-    if (_game_over && _winner == 0 && _result_ms > 0 && now - _result_ms > 1800 && !_net_pvp &&
-        !_assess_mode) {
-        resetGame();
-        return;
-    }
+    /* 平局以前 1.8s 后自动开新局, 比战报面板的 2.2s 更早 —— 结果就是平局永远
+     * 看不到结算面板(实测九星满盘那局: 面板没出现, 画面直接变成空盘 MOVE 0,
+     * 玩家以为自己的最后一手被吞了)。现在和赢/输一致: 停在战报, 按 R 再开。 */
 
     // ---- 棋谱回放：每 350ms 摆一手 ----
     if (_replay_active) {
@@ -692,11 +737,48 @@ void AppGomoku::onRunning() {
     // 结束后 2.2 秒弹出战报
     if (_game_over && !_result_visible && _result_ms > 0 && now - _result_ms > 2200) {
         _result_visible = true;
+        /* 战报右侧那块空白要放 AI 的局终嘴炮: 赢棋时 endGame 不会骂人,
+         * 这里补一条普通嘴炮(输棋时 endGame 已经给了 kind=3 的三行)。 */
+        if (!_pvp && !_assess_mode && !_taunt_visible) {
+            _taunt_kind = 0;
+            _taunt_index = (int)(esp_random() % kTauntNormalN);
+            _taunt_visible = true;
+        }
+        if (!_pvp && !_assess_mode) {
+            const char* tl[3];
+            int tn = resolveTauntLines(tl);
+            if (_winner == 1) {
+                _next_game_ms = now + 20000;  // 赢棋: 20 秒后自动开下一局(等级已在 endGame 里 +1)
+                ESP_LOGI("GOMOKU", "result panel winner=%d taunt kind=%d \"%s\" \"%s\" next=20s",
+                         _winner, _taunt_kind, tl[0] ? tl[0] : "", (tn > 1 && tl[1]) ? tl[1] : "");
+            } else {
+                _next_game_ms = 0;            // 输/平: 不倒计时, 停在战报等玩家按键
+                ESP_LOGI("GOMOKU", "result panel winner=%d taunt kind=%d \"%s\" \"%s\" next=none (wait key)",
+                         _winner, _taunt_kind, tl[0] ? tl[0] : "", (tn > 1 && tl[1]) ? tl[1] : "");
+            }
+        }
         drawBoard();
     }
 
-    // 普通嘲讽自动消失
-    if (_taunt_visible && _taunt_kind != 3 && now - _taunt_timer > 2900) {
+    // 结算面板倒计时: 每秒刷新一次, 到点自动进下一局(等级在 endGame 里已结算)
+    if (_result_visible && _next_game_ms) {
+        if (now >= _next_game_ms) {
+            _next_game_ms = 0;
+            ESP_LOGI("GOMOKU", "auto next game lv=%d (countdown done)", _difficulty);
+            resetGame();
+            drawBoard();
+        } else {
+            static uint32_t s_cd_left = 999;
+            uint32_t left = (_next_game_ms - now) / 1000 + 1;
+            if (left != s_cd_left) {
+                s_cd_left = left;
+                drawBoard();
+            }
+        }
+    }
+
+    // 普通嘲讽自动消失（战报面板要一直留一句 AI 嘴炮, 所以结算期间不自动隐藏）
+    if (_taunt_visible && _taunt_kind != 3 && !_result_visible && now - _taunt_timer > 2900) {
         _taunt_visible = false;
         drawBoard();
     }
@@ -755,8 +837,8 @@ void AppGomoku::onClose() {
         free(_fb);
         _fb = nullptr;
     }
-    _canvas->setColorDepth(16);
-    _canvas->createSprite(GetHAL().display().width(), 109);
+    // 统一恢复系统画布（16bpp / 109 高，launcher 依赖）
+    appCanvasRestore(getAppInfo().name);
 
     _canvas = nullptr;
     ESP_LOGI("GOMOKU", "onClose done heap=%u", (unsigned)esp_get_free_heap_size());
@@ -801,12 +883,16 @@ void AppGomoku::resetGame() {
     _game_start_ms = GetHAL().millis();
     _result_visible = false;
     _result_ms = 0;
+    _next_game_ms = 0;   // 开新局就取消"自动进下一局"的倒计时
     _achv_new = 0;
     _help_visible = false;
     _iter_best_r = _iter_best_c = -1;
     _blunders = 0;
     _worst_loss = 0;
     _worst_move_no = 0;
+    _worst_is_lost = false;   // 转折点标记只在开新局时清, 不能每步 AI 走子就清
+    _futile_cnt = 0;
+    _futile_first = 0;
 
     // 限时钟 / 回放
     _clock_ms[1] = _clock_ms[2] = 60 * 1000;
@@ -838,6 +924,11 @@ void AppGomoku::resetGame() {
     _cheat_freeze_ms = 0;
 
     recordTrend();
+
+    /* 每局开局都打一行当前等级, 方便从串口日志核对难度切换是否生效 */
+    ESP_LOGI("GOMOKU", "new game lv=%d persona=%d assess=%d ai=%d assist=%d pvp=%d heap=%u",
+             _difficulty, _persona, (int)_assess_mode, (int)_is_ai_mode,
+             (int)_is_ai_assist_mode, (int)_pvp, (unsigned)esp_get_free_heap_size());
 }
 
 void AppGomoku::undoMove() {
@@ -988,7 +1079,7 @@ void AppGomoku::handleNetPvp(uint32_t now) {
         if (now - _banner_ms > 33) {
             _banner_ms = now;
             drawCheatBanner(now);
-            _canvas->pushSprite(0, 0);
+            appCanvasPush(_canvas);
             _banner_on = true;
         }
     } else if (_banner_on) {
@@ -1003,6 +1094,7 @@ void AppGomoku::moveCursor(int dx, int dy) {
     if (isValid(ny, nx)) {
         _cursor_x = nx;
         _cursor_y = ny;
+        ESP_LOGI("GOMOKU", "cur %c%d", 'A' + nx, ny + 1);   // 光标轨迹(自动化定位/取证)
         drawBoard();
     }
 }
@@ -1013,15 +1105,34 @@ bool AppGomoku::isValid(int r, int c) {
 
 void AppGomoku::playAt(int r, int c) {
     if (!isValid(r, c) || _board[r][c] != 0) return;
+    /* placePiece() 是"按光标落子"的, AI 走这里必须临时借用光标。
+     * 以前借完不还: AI 每落一手, 玩家的红框光标就被悄悄搬到 AI 的棋子上,
+     * 玩家再按回车等于落子到已占格 —— 没有任何提示, 看起来像卡死。
+     * (实测: 九星满盘那局, 光标被搬到 A1 的 AI 子上, 之后按键全部压边界无反馈) */
+    int save_x = _cursor_x, save_y = _cursor_y;
     _cursor_x = c;
     _cursor_y = r;
     placePiece();
+    _cursor_x = save_x;
+    _cursor_y = save_y;
+    drawBoard();   // 把红框画回玩家自己的位置
 }
 
 void AppGomoku::placePiece() {
+    // 这段(音频/绘制)是阻塞的, 单独计时: 报告里的"思考耗时"要把它刨掉,
+    // 才能让 nodes 与耗时对得上(以前 0 节点却 500ms, 全是音频和落子绘制)。
+    uint32_t t_place = GetHAL().millis();
     // 作弊问责冻结/答题期间: 任何人都不许落子
     if (_cheat_alert) return;
-    if (_board[_cursor_y][_cursor_x] != 0) return;
+    if (_board[_cursor_y][_cursor_x] != 0) {
+        // 落了没反应时, 这行日志能直接区分"点到已有子"还是"根本没轮到玩家"
+        ESP_LOGW("GOMOKU", "place ignored: %c%d occupied by P%d cur_p=%d over=%d ai_thinking=%d",
+                 'A' + _cursor_x, _cursor_y + 1, _board[_cursor_y][_cursor_x],
+                 _current_player, (int)_game_over, (int)_ai_thinking);
+        // 画面上也要有反馈: 以前只在日志里, 玩家以为按键坏了
+        s_cell_tip_until = GetHAL().millis() + 1500;
+        return;
+    }
     // 玩家回合封锁已经在键盘回调里做了, 这里只检查 AI 不能主动 placePiece
     // (AI 走 playAt 直接调 makeMove 相关, 不走这里)
 
@@ -1030,6 +1141,13 @@ void AppGomoku::placePiece() {
         // 智力测试用新的"悔手度"口径; 普通模式仍用原来的复盘提示
         if (_assess_mode) assessPlayerMove(_cursor_y, _cursor_x);
         else reviewPlayerMove(_cursor_y, _cursor_x);
+    }
+
+    // 落子前记录 AI 的一步成五点: 用来判断这一手是不是"把 AI 堵住了"
+    int ai_wins_before = -1;
+    if (p == 1 && !_pvp && !_is_ai_assist_mode) {
+        int tw0 = -1, tc0 = -1;
+        ai_wins_before = countWinPoints(2, tw0, tc0);
     }
 
     makeMove(_cursor_y, _cursor_x, p);
@@ -1064,9 +1182,20 @@ void AppGomoku::placePiece() {
                 _long_taunt_done = false;
             }
         }
+
+        // 场面嘴炮: 被堵 / 我快输 / AI 快赢 —— 不是只在作弊时才说话
+        if (!_game_over && !_pvp && !_is_ai_assist_mode) {
+            int wr = -1, wc = -1;
+            int ai_now = countWinPoints(2, wr, wc);
+            int my_now = countWinPoints(1, wr, wc);
+            if (ai_wins_before >= 1 && ai_now == 0) showTaunt(6);   // 一手成五被堵
+            else if (my_now >= 2) showTaunt(8);                     // 我双四, AI 急了
+            else if (ai_now >= 1) showTaunt(7);                     // AI 有成五点, 快赢了
+        }
     }
 
     drawBoard();
+    _place_ms += GetHAL().millis() - t_place;
 }
 
 // ================= 终局 / 回放 =================
@@ -1109,9 +1238,12 @@ void AppGomoku::endGame(int winner) {
             _level_up_pending = false;
             audio::play_melody({ 76, 80, 83, 88 }, 0.05);
         } else {
-            _win_anim_start = GetHAL().millis();
-            _win_anim_active = true;
-            _level_up_pending = true;
+            // 赢棋也进结算面板: 等级当场结算(只加一档), 不再用 1.8s 动画把棋盘重置掉,
+            // 玩家能看到终局棋盘、按 V 回看整局、按 R 再开新局。
+            _win_anim_active = false;
+            _level_up_pending = false;
+            if (_difficulty < 10) _difficulty++;
+            ESP_LOGI("GOMOKU", "win -> next lv=%d (applied on next new game)", _difficulty);
             audio::play_melody({ 76, 80, 83, 88 }, 0.05);
         }
     } else if (draw_game) {
@@ -1125,6 +1257,10 @@ void AppGomoku::endGame(int winner) {
     }
 
     if (_assess_mode) computeAssessment();
+
+    ESP_LOGI("GOMOKU", "game over winner=%d lv=%d moves=%d blunders=%d worst=#%d worst_loss=%d futile=%d",
+             _winner, _difficulty, (int)_move_history.size(), _blunders, _worst_move_no, _worst_loss,
+             _futile_cnt);
 }
 
 void AppGomoku::startReplay() {
@@ -1143,6 +1279,7 @@ void AppGomoku::startReplay() {
     _replay_idx = 0;
     _replay_timer = 0;
     _result_visible = false;
+    _next_game_ms = 0;   // 回放时别让"自动进下一局"把棋谱顶掉
     drawBoard();
 }
 
@@ -1406,7 +1543,7 @@ int AppGomoku::negamax(int player, int depth, int alpha, int beta, int ply) {
 // 迭代加深：从浅到深搜，把上一层的结果当作下一层的首选点。
 // 好处是时间不够时也能拿出"上一层搜完的那一手"，不会一无所获。
 bool AppGomoku::searchBest(int depth, int& br, int& bc) {
-    _nodes = 0;
+    resetSearchNodes();
     _search_aborted = false;
     _iter_best_r = _iter_best_c = -1;
     br = bc = -1;
@@ -1486,7 +1623,7 @@ bool AppGomoku::vcf(int player, int depth, int& outR, int& outC) {
 int AppGomoku::vcfDistance(int player, int maxDepth) {
     int r, c;
     for (int d = 2; d <= maxDepth; d += 2) {
-        _nodes = 0;
+        resetSearchNodes();
         if (vcf(player, d, r, c)) return d / 2;
     }
     return 0;
@@ -1532,6 +1669,22 @@ int AppGomoku::countWinPoints(int player, int& r, int& c) {
         r = c = -1;
     }
     return n;
+}
+
+/* 双四杀点: 在 (r,c) 落 p 之后同时出现 >=2 个成五点。对手一次只能挡一个,
+ * 下一手必成五 —— 这是"活四/双四"级别的必杀, 单靠搜索浅层常常看不出来。
+ * winPoints() 带 (r,c) 虚下, 不用改盘面, 全盘扫一遍也就几十微秒。 */
+bool AppGomoku::decisivePoint(int p, int& r, int& c) {
+    r = c = -1;
+    int a[8], b[8], bestN = 1;
+    for (int i = 0; i < BOARD_SIZE; i++) {
+        for (int j = 0; j < BOARD_SIZE; j++) {
+            if (_board[i][j] || _near[i][j] == 0 || _forbid[i][j]) continue;
+            int n = winPoints(i, j, p, a, b, 8);
+            if (n > bestN) { bestN = n; r = i; c = j; }
+        }
+    }
+    return r >= 0;
 }
 
 // ================= 作弊 =================
@@ -1928,10 +2081,12 @@ void AppGomoku::triggerCheatAlert() {
     _cheat_alert = 1;
     _cheat_freeze_ms = GetHAL().millis();
     _cheat_sel = 0;
+    _cheat_ask_idx = (int)(esp_random() % kCheatAskN);
     _ai_move_timer = 0;
     _taunt_visible = false;
     drawBoard();
-    ESP_LOGI("GOMOKU", "AI caught cheat! freeze=1500ms heap=%u", (unsigned)esp_get_free_heap_size());
+    ESP_LOGI("GOMOKU", "AI caught cheat! freeze=1500ms ask=\"%s\" heap=%u",
+             kCheatAsk[_cheat_ask_idx], (unsigned)esp_get_free_heap_size());
 }
 
 void AppGomoku::resolveCheatChoice() {
@@ -1956,7 +2111,13 @@ void AppGomoku::resolveCheatChoice() {
     }
 
     drawBoard();
-    ESP_LOGI("GOMOKU", "cheat answer=%s difficulty=%d", _caught_deny ? "NO" : "YES", _difficulty);
+    {
+        const char* tl[3];
+        int tn = resolveTauntLines(tl);
+        ESP_LOGI("GOMOKU", "cheat answer=%s difficulty=%d taunt kind=5 idx=%d \"%s\" \"%s\"",
+                 _caught_deny ? "NO" : "YES", _difficulty, _taunt_index,
+                 tl[0] ? tl[0] : "", (tn > 1 && tl[1]) ? tl[1] : "");
+    }
 }
 
 // 开局库：白方第一手贴身斜扛，第二手之前交给搜索
@@ -2045,23 +2206,159 @@ void AppGomoku::heuristicMove(int lvl, int& br, int& bc) {
     }
 }
 
-// 玩家每落一子，跟"当前局面下的最优点"比一下，记录失误
-void AppGomoku::reviewPlayerMove(int r, int c) {
-    int R[40], C[40];
-    int n = genMoves(R, C, 40, 1);
-    if (n <= 0) return;
+// 轮到 opp 走时, 他是否已经锁死胜局(我怎么挡都输):
+//   1) 他现在就有成五点 -> 下一手直接成五;
+//   2) 他有一手 q, 走完之后我必须同时挡两个点(他的成五点/活四点),
+//      而且我挡掉任意一个之后, 他仍然留着另一个能直接赢的点。
+// 这能识别"四+活三"、"双活三"、"活四"这类双杀; 也不会被假双杀骗到:
+// 如果两个"必挡点"其实是同一个缺口(挡一个就同时解掉两个), 挡掉后没有残留,
+// 就判为有解、不算必胜(实测 #45 的 H4 就是这种假双杀)。
+bool AppGomoku::oppForcedWin(int opp)
+{
+    const int me = (opp == 1) ? 2 : 1;
+    int a[8], b[8];
 
-    // 一个点的价值 = 自己下这里的进攻价值 + 挡住对手的价值
-    int mine = heuristicPoint(r, c, 1) + heuristicPoint(r, c, 2);
-    int best = mine;
+    // 1) 现成成五点
+    for (int r = 0; r < BOARD_SIZE; r++) {
+        for (int c = 0; c < BOARD_SIZE; c++) {
+            if (_board[r][c] || _near[r][c] == 0) continue;
+            if (winPoints(r, c, opp, a, b, 8) < 0) return true;
+        }
+    }
+
+    // 2) 一手双杀
+    for (int r = 0; r < BOARD_SIZE; r++) {
+        for (int c = 0; c < BOARD_SIZE; c++) {
+            if (_board[r][c] || _near[r][c] == 0) continue;
+            int k = winPoints(r, c, opp, a, b, 8);
+            if (k == 0) continue;              // 连四都做不出来, 锁不死
+            makeMove(r, c, opp);
+
+            int pts[8], np = 0;
+            for (int rr = 0; rr < BOARD_SIZE && np < 8; rr++) {
+                for (int cc = 0; cc < BOARD_SIZE; cc++) {
+                    if (_board[rr][cc] || _near[rr][cc] == 0) continue;
+                    int kk = winPoints(rr, cc, opp, a, b, 8);
+                    if (kk == 0 || kk == 1) continue;   // 只算成五点(-1)和活四点(>=2)
+                    bool dup = false;
+                    for (int i = 0; i < np; i++) if (pts[i] == rr * BOARD_SIZE + cc) dup = true;
+                    if (!dup) pts[np++] = rr * BOARD_SIZE + cc;
+                }
+            }
+
+            bool locked = (np > 0);
+            for (int i = 0; i < np && locked; i++) {
+                int rr = pts[i] / BOARD_SIZE, cc = pts[i] % BOARD_SIZE;
+                makeMove(rr, cc, me);          // 我去挡这个点
+                bool still = false;
+                for (int x = 0; x < BOARD_SIZE && !still; x++) {
+                    for (int y = 0; y < BOARD_SIZE; y++) {
+                        if (_board[x][y] || _near[x][y] == 0) continue;
+                        int kk = winPoints(x, y, opp, a, b, 8);
+                        if (kk == 0 || kk == 1) continue;
+                        still = true;
+                        break;
+                    }
+                }
+                unmakeMove(rr, cc, me);
+                if (!still) locked = false;    // 挡一个就把两个都解了 -> 有解
+            }
+
+            unmakeMove(r, c, opp);
+            if (locked) return true;
+        }
+    }
+    return false;
+}
+
+// 玩家每落一子，跟"当前局面下的最优点"比一下，记录失误。
+// 口径(按优先级):
+//   0) 本手是不是"被迫挡五": 对手已经有成五点, 这手只能挡, 挡哪个都是被迫 ->
+//      不计失误、也不当转折点。实测这局的 #47~#55 全是这种手(每手都对应一个
+//      AI 的成五点: J1/G4/K4/I5/I1), #53 的 I5 也是唯一不立刻输的走法。
+//   1) 败着后悔度: 本手走完后对手是否已经锁死胜局:
+//      - oppForcedWin: 四+活三 / 双四 这类一手双杀;
+//      - vcf: 连续冲四杀(本局 AI 从 #46 J2 起就是这条链, 一路把玩家逼进必挡)。
+//      局面分看不到这种杀(活三每窗口才 300 分), 所以原先最大失误只指到小手。
+//   2) 局面分后悔度: 最优候选走完后的 _score[1]-_score[2] 减去本手走完后的分数。
+void AppGomoku::reviewPlayerMove(int r, int c) {
+    // 0) 本手是否被迫: 对手现在就有成五点
+    bool forced = false;
+    {
+        int a[8], b[8];
+        for (int rr = 0; rr < BOARD_SIZE && !forced; rr++) {
+            for (int cc = 0; cc < BOARD_SIZE; cc++) {
+                if (_board[rr][cc] || _near[rr][cc] == 0) continue;
+                if (winPoints(rr, cc, 2, a, b, 8) < 0) {
+                    forced = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    int R[24], C[24];
+    int n = genMoves(R, C, 24, 1);
+
+    // 1) 本手走完: 局面分 + 对手是否已经锁死
+    makeMove(r, c, 1);
+    int32_t played = _score[1] - _score[2];
+    int lost_via = 0;   // 0=没输 1=双杀 2=VCF
+    if (!forced) {
+        if (oppForcedWin(2)) {
+            lost_via = 1;
+        } else {
+            int vr, vc;
+            _deadline_us = now_us() + 200000;   // 复盘单独限时, 不占 AI 思考预算
+            _nodes = 0;
+            /* 深度 10: 这局的杀是 5 个冲四连起来(J2->H4->L4->K3->M5),
+             * 每层 AI 一手 + 对方必挡一手, 深度给不够就看不见这条链 */
+            if (vcf(2, 10, vr, vc)) lost_via = 2;
+        }
+    }
+    unmakeMove(r, c, 1);
+
+    // 2) 局面分基准: genMoves 候选里的最优
+    int32_t best = played;
     for (int i = 0; i < n; i++) {
-        int v = heuristicPoint(R[i], C[i], 1) + heuristicPoint(R[i], C[i], 2);
+        if (!isValid(R[i], C[i]) || _board[R[i]][C[i]] != 0) continue;
+        if (R[i] == r && C[i] == c) continue;
+        makeMove(R[i], C[i], 1);
+        int32_t v = _score[1] - _score[2];
+        unmakeMove(R[i], C[i], 1);
         if (v > best) best = v;
     }
 
-    int loss = best - mine;
-    if (loss > 1500) _blunders++;
-    if (loss > _worst_loss) {
+    int32_t loss = best - played;
+    if (loss < 0) loss = 0;
+    if (lost_via) loss += 20000;
+
+    if (forced || lost_via || loss > 1500) {
+        ESP_LOGI("GOMOKU", "review #%d forced=%d loss=%d score=%d lost=%d",
+                 (int)_move_history.size() + 1, (int)forced, (int)loss,
+                 (int)(best - played), lost_via);
+    }
+    if (forced) {
+        /* 必挡·无奈: 对手已经摆出成五点, 这手只能挡, 而且局面早就锁死了
+         * (转折手已判出) —— 这类手不是"能救没救", 单独计数, 不混进最大失误。 */
+        if (_worst_is_lost) {
+            if (_futile_cnt == 0) _futile_first = (int)_move_history.size() + 1;
+            _futile_cnt++;
+        }
+        return;   // 被迫挡五: 不算失误, 也不覆盖转折点
+    }
+
+    if (lost_via || loss > 1500) _blunders++;
+
+    // 第一手"走完对手就锁死胜局"的棋就是本局转折点; 之后同类的必输手
+    // 不再覆盖它(否则越靠后的手, 被逼出来的分数越高, 会把转折点顶掉)。
+    if (lost_via) {
+        if (!_worst_is_lost) {
+            _worst_is_lost = true;
+            _worst_loss = loss;
+            _worst_move_no = (int)_move_history.size() + 1;
+        }
+    } else if (!_worst_is_lost && loss > _worst_loss) {
         _worst_loss = loss;
         _worst_move_no = (int)_move_history.size() + 1;
     }
@@ -2102,9 +2399,9 @@ void AppGomoku::updateDanger() {
             // 2) 连续冲四（VCF）的必然杀
             //    只有 1 个成五点时玩家挡掉就没事，不算必杀，走下面的估算
             _deadline_us = now_us() + (_difficulty >= 8 ? 260000 : 120000);
-            _nodes = 0;
+            resetSearchNodes();
             int d = vcfDistance(2, (_difficulty >= 8) ? 10 : 6);
-            _nodes = 0;
+            resetSearchNodes();
             if (d > 0) _danger_moves = d + 1;   // 冲四序列 + 最后成五的那一手
         }
 
@@ -2262,18 +2559,45 @@ void AppGomoku::showTaunt(int kind) {
     else if (kind == 1) _taunt_index = (int)(esp_random() % kTauntLongN);
     else if (kind == 2) _taunt_index = (_cheat_kind_last < 0) ? 0 : _cheat_kind_last;
     else if (kind == 4) _taunt_index = (int)(esp_random() % kTauntThinkN);
+    else if (kind == 6) _taunt_index = (int)(esp_random() % kTauntBlockedN); // 被堵
+    else if (kind == 7) _taunt_index = (int)(esp_random() % kTauntNearWinN); // 快赢
+    else if (kind == 8) _taunt_index = (int)(esp_random() % kTauntDangerN);  // 快输
     else _taunt_index = (int)(esp_random() % kTauntWinN);
     _taunt_visible = true;
     _taunt_timer = GetHAL().millis();
+
+    // 嘴炮可观测: 被抓到"说了哪一句"全靠这行(自动化测试也读它)
+    {
+        const char* tl[3];
+        int tn = resolveTauntLines(tl);
+        ESP_LOGI("GOMOKU", "taunt kind=%d idx=%d \"%s\" \"%s\" \"%s\"",
+                 kind, _taunt_index, tl[0] ? tl[0] : "",
+                 (tn > 1 && tl[1]) ? tl[1] : "", (tn > 2 && tl[2]) ? tl[2] : "");
+    }
     drawBoard();
 }
 
 // ================= 决策 =================
 
+void AppGomoku::dumpBoardLog(const char* why) {
+    ESP_LOGI("GOMOKU", "%s board dump cheats=%d moves=%d", why, _cheat_count, (int)_move_history.size());
+    char row[BOARD_SIZE + 1];
+    for (int r = 0; r < BOARD_SIZE; r++) {
+        for (int c = 0; c < BOARD_SIZE; c++) {
+            row[c] = (_board[r][c] == 1) ? 'X' : (_board[r][c] == 2 ? 'O' : '.');
+        }
+        row[BOARD_SIZE] = 0;
+        ESP_LOGI("GOMOKU", "B %s", row);
+    }
+}
+
 void AppGomoku::aiMove() {
     memset(_forbid, 0, sizeof(_forbid));
     _cheat_depth = 0;
     _ai_thinking = true;  // 封锁玩家输入, 防止 AI 搜索期间玩家改 _board 导致竞态闪退
+    _nodes = 0;
+    _nodes_move = 0;
+    _place_ms = 0;
 
     // 思考时偶尔冒出一句碎碎念（让我想想我下哪……）
     if (!_is_ai_assist_mode && (int)(esp_random() % 100) < 55) {
@@ -2287,13 +2611,32 @@ void AppGomoku::aiMove() {
              (unsigned)uxTaskGetStackHighWaterMark(nullptr));
 
     heapProbe("ai_start");
+    int cheats_before = _cheat_count;
     aiMoveInner();
+    // 十星作弊会直接改盘(偷子/挪子/打乱…), 日志里的 move 行已经不能代表盘面,
+    // 这里把作弊后的真实盘面整盘打出来, 供自动化脚本与取证复核对齐。
+    if (_cheat_count != cheats_before) dumpBoardLog("ai cheat");
     heapProbe("ai_end");
 
-    ESP_LOGI("GOMOKU", "ai done %ums nodes=%d heap=%u stack_hw=%u",
-             (unsigned)(GetHAL().millis() - t0), (int)_nodes,
+    uint32_t total_ms = GetHAL().millis() - t0;
+    uint32_t think_ms = (total_ms > _place_ms) ? (total_ms - _place_ms) : 0;
+
+    ESP_LOGI("GOMOKU", "ai done %ums think=%ums place=%ums nodes=%d (last_search=%d) heap=%u stack_hw=%u",
+             (unsigned)total_ms, (unsigned)think_ms, (unsigned)_place_ms,
+             (int)(_nodes_move + _nodes), (int)_nodes,
              (unsigned)esp_get_free_heap_size(),
              (unsigned)uxTaskGetStackHighWaterMark(nullptr));
+
+    // AI 出招后照样嘴炮: 快赢/快输优先, 否则过半概率来一句
+    if (!_game_over && !_pvp && !_is_ai_assist_mode && !_cheat_alert &&
+        !(_taunt_visible && (_taunt_kind == 2 || _taunt_kind == 5))) {
+        int wr = -1, wc = -1;
+        int ai_now = countWinPoints(2, wr, wc);
+        int my_now = countWinPoints(1, wr, wc);
+        if (ai_now >= 1) showTaunt(7);
+        else if (my_now >= 2) showTaunt(8);
+        else if (!_taunt_visible && (esp_random() % 100) < 55) showTaunt(0);
+    }
 
     _ai_thinking = false;
 }
@@ -2334,6 +2677,26 @@ void AppGomoku::aiMoveInner() {
     // 3) 开局库
     if (lvl >= 3 && openingBook(r, c)) { playAt(r, c); updateDanger(); return; }
 
+    /* 3.5) 十星专属: 双四/活四杀点。这一层是九星完全没有的 ——
+     * 九星只会在 negamax 里"碰巧"搜到杀, 十星直接按 pattern 找必杀:
+     * ① 自己落下能造 >=2 个成五点 → 对手挡不住, 立刻赢;
+     * ② 对手有这种点 → 先占掉(提前化解), 而不是等他成了四再去堵。 */
+    if (lvl >= 10) {
+        int kr = -1, kc = -1;
+        if (decisivePoint(2, kr, kc)) {
+            ESP_LOGI("GOMOKU", "lv10 double-four kill %c%d", 'A' + kc, BOARD_SIZE - kr);
+            playAt(kr, kc);
+            updateDanger();
+            return;
+        }
+        if (decisivePoint(1, kr, kc)) {
+            ESP_LOGI("GOMOKU", "lv10 preempt opp double-four %c%d", 'A' + kc, BOARD_SIZE - kr);
+            playAt(kr, kc);
+            updateDanger();
+            return;
+        }
+    }
+
     // 4) 低星：纯启发式，故意留破绽
     if (lvl <= 4) {
         heuristicMove(lvl, r, c);
@@ -2342,24 +2705,29 @@ void AppGomoku::aiMoveInner() {
     }
 
     // 5) 中高星：先 VCF 找连续冲四杀
-    int vd = (lvl >= 9) ? 10 : (lvl >= 8 ? 8 : 6);
+    /* 每一档都必须有自己的参数: 之前 5/6 两档完全一致, 实测同一开局下
+     * Lv.5 与 Lv.6 逐手 112 手完全相同 —— 六星等于白给, 难度阶梯断了。 */
+    int vd = (lvl >= 10) ? 14 : (lvl >= 9 ? 10 : (lvl >= 8 ? 8 : 6));
     {
-        _nodes = 0;
-        _deadline_us = now_us() + (lvl >= 9 ? 450000 : 250000);
+        resetSearchNodes();
+        _deadline_us = now_us() + (lvl >= 10 ? 700000 : (lvl >= 9 ? 450000 : (lvl == 6 ? 300000 : 250000)));
     }
     if (vcf(2, vd, r, c)) { playAt(r, c); updateDanger(); return; }
 
     // 6) 深搜（性格 + 情绪都会影响深度：急了多算，领先了浪，诡诈少算靠作弊补）
-    int depth = (lvl >= 9) ? 6 : (lvl >= 7 ? 4 : 2);
-    if (_persona == 1 && depth < 6) depth += 2;   // 凶狠：多算两层
-    if (_persona == 2 && depth > 2) depth -= 2;   // 诡诈：少算两层
-    if (_mood == 1 && depth < 6) depth += 2;      // 急了
-    if (_mood == 2 && depth > 2) depth -= 2;      // 浪了
-    if (depth > 7) depth = 7;  // 硬封顶: 递归太深会爆栈
+    //    十星例外: 不吃性格/情绪降智, 永远按满深度算
+    int depth = (lvl >= 10) ? 8 : (lvl >= 9) ? 6 : (lvl >= 7 ? 4 : (lvl >= 6 ? 3 : 2));
+    if (lvl < 10) {
+        if (_persona == 1 && depth < 6) depth += 2;   // 凶狠：多算两层
+        if (_persona == 2 && depth > 2) depth -= 2;   // 诡诈：少算两层
+        if (_mood == 1 && depth < 6) depth += 2;      // 急了
+        if (_mood == 2 && depth > 2) depth -= 2;      // 浪了
+    }
+    if (depth > 8) depth = 8;  // 硬封顶: 递归太深会爆栈
 
-    int budget = (lvl >= 10) ? 600 : (lvl >= 9 ? 500 : (lvl >= 8 ? 400 : (lvl >= 7 ? 300 : 200)));
+    int budget = (lvl >= 10) ? 1000 : (lvl >= 9 ? 500 : (lvl >= 8 ? 400 : (lvl >= 7 ? 300 : (lvl >= 6 ? 250 : 200))));
 
-    _nodes = 0;
+    resetSearchNodes();
     _deadline_us = now_us() + budget * 1000;
     if (!searchBest(depth, r, c) || r < 0) {
         heuristicMove(5, r, c);
@@ -2380,9 +2748,11 @@ void AppGomoku::aiMoveInner() {
         makeMove(r, c, 2);
         if (!isFive(r, c, 2)) {
             int dr, dc;
-            _nodes = 0;
-            _deadline_us = now_us() + 220000;
-            bad = vcf(1, 6, dr, dc);
+            resetSearchNodes();
+            /* 反杀检查也要比九星看得更深: 九星这一层根本不存在,
+             * 十星按 depth10 / 350ms 把对手的冲四杀算穿 */
+            _deadline_us = now_us() + 350000;
+            bad = vcf(1, 10, dr, dc);
         }
         unmakeMove(r, c, 2);
 
@@ -2391,7 +2761,7 @@ void AppGomoku::aiMoveInner() {
             _cheat_count++;
             _cheat_kind_last = 4;
             showTaunt(2);
-            _nodes = 0;
+            resetSearchNodes();
             _deadline_us = now_us() + budget * 1000;
             if (searchBest(depth, r, c) && r >= 0) {
                 playAt(r, c);
@@ -2517,7 +2887,7 @@ void AppGomoku::drawInfoPanel(int x, int w) {
         if (_net_cheat && _hint_r >= 0) _canvas->printf("下 %c%d", 'A' + _hint_c, _hint_r + 1);
         else if (_net_cheat) _canvas->print("作弊中");
 
-        _canvas->setFont(&fonts::Font0);
+        _canvas->setFont(&fonts::efontCN_10);
         return;
     }
 
@@ -2526,32 +2896,21 @@ void AppGomoku::drawInfoPanel(int x, int w) {
     _canvas->setCursor(x, 2);
     _canvas->print("你还剩");
 
-    char buf[4];
-    if (_danger_moves >= 10) {
-        buf[0] = (char)('0' + (_danger_moves / 10) % 10);
-        buf[1] = (char)('0' + _danger_moves % 10);
-        buf[2] = '\0';
-    } else if (_danger_moves > 0) {
-        buf[0] = (char)('0' + _danger_moves);
-        buf[1] = '\0';
+    /* 危险步数和"步"必须画在同一行: 原来数字用 Font2 大字号画在 y=14,
+     * "步"画在 y=22, 数字下半截直接压住"步"; 0 步时只剩一个暗灰"-",
+     * 玩家根本不知道这是"没有危险"还是"没数据"。 */
+    _canvas->setCursor(x + 2, 15);
+    if (_danger_moves <= 0) {
+        _canvas->setTextColor(TFT_GREEN);
+        _canvas->print("安全");
     } else {
-        buf[0] = '-';
-        buf[1] = '-';
-        buf[2] = '\0';
+        char dbuf[24];
+        int dm = _danger_moves > 99 ? 99 : _danger_moves;   // 右栏只有 64px, 两位数是上限
+        snprintf(dbuf, sizeof(dbuf), "危%d步", dm);
+        _canvas->setTextColor(_danger_moves <= 3 ? TFT_RED
+                              : (_danger_moves <= 10 ? TFT_ORANGE : TFT_YELLOW));
+        _canvas->print(dbuf);
     }
-
-    _canvas->setFont(&fonts::Font2);
-    int tw = _canvas->textWidth(buf);
-    _canvas->setTextColor(_danger_moves > 0
-                              ? ((_danger_moves <= 3) ? TFT_RED : (_danger_moves <= 10 ? TFT_ORANGE : TFT_YELLOW))
-                              : TFT_DARKGREY);
-    _canvas->setCursor(x + 2, 14);
-    _canvas->print(buf);
-
-    _canvas->setFont(&fonts::efontCN_12);
-    _canvas->setTextColor(TFT_DARKGREY);
-    _canvas->setCursor(x + 4 + tw, 22);
-    _canvas->print("步");
 
     // 性格竖着放在右侧竖条空位：字大才看得清
     {
@@ -2559,9 +2918,13 @@ void AppGomoku::drawInfoPanel(int x, int w) {
         const char* pn = kPersonaName[pid];
         _canvas->setFont(&fonts::efontCN_14);
         _canvas->setTextColor(kPersonaColor[pid]);
-        int vx = x + w - 16;
         for (int i = 0; i < 2 && pn[i * 3]; i++) {
             char ch[4] = { pn[i * 3], pn[i * 3 + 1], pn[i * 3 + 2], 0 };
+            /* 按实测字宽右对齐: 原来固定 x+w-16, 14px 字实际占 15~16px,
+             * "稳健/凶狠/诡诈"最后一笔会被屏幕右边缘切掉。 */
+            int cw = _canvas->textWidth(ch);
+            int vx = x + w - cw - 2;   // 留 2px: 贴到 240 时最后一笔会被屏幕边缘切掉
+            if (vx < x + w / 2) vx = x + w / 2;
             _canvas->setCursor(vx, 2 + i * 16);
             _canvas->print(ch);
         }
@@ -2570,23 +2933,28 @@ void AppGomoku::drawInfoPanel(int x, int w) {
 
     drawTrend(x, 34, w, 20);
 
-    _canvas->setFont(&fonts::Font0);
+    _canvas->setFont(&fonts::efontCN_10);
     _canvas->setTextColor(TFT_LIGHTGREY);
-    _canvas->setCursor(x, 57);
+    _canvas->setCursor(x, 55);
     _canvas->printf("MOVE %d", (int)_move_history.size());
 
-    _canvas->setFont(&fonts::efontCN_12);
-    _canvas->setTextColor(TFT_MAGENTA);
-    _canvas->setCursor(x, 66);
-    _canvas->printf("作弊%d %s", _cheat_count, (_mood == 1) ? "急" : (_mood == 2 ? "浪" : "稳"));
+    /* "作弊N 次 + 性格字" 整组压到右栏最底部: 原来在 y=108, 10px 字
+     * 底边压在 y=118 的局势条上; AI 骂人文字块底边固定在 105, 所以这里取 106,
+     * 上不压骂人、下不压局势条。 */
+    if (!_cheat_alert) {
+        _canvas->setFont(&fonts::efontCN_10);
+        _canvas->setTextColor(TFT_MAGENTA);
+        _canvas->setCursor(x, 106);
+        _canvas->printf("作弊%d %s", _cheat_count, (_mood == 1) ? "急" : (_mood == 2 ? "浪" : "稳"));
+    }
 
     // 局势平衡条：绿色 = 你占优，红色 = AI 占优
     if (!(_taunt_visible && _taunt_kind == 3)) {
         int32_t s1 = (_score[1] > 0) ? _score[1] : 0;
         int32_t s2 = (_score[2] > 0) ? _score[2] : 0;
         int split = (int)((int64_t)(s1 + 1) * w / (s1 + s2 + 2));
-        _canvas->fillRect(x, 114, split, 3, TFT_GREEN);
-        _canvas->fillRect(x + split, 114, w - split, 3, TFT_RED);
+        _canvas->fillRect(x, 118, split, 3, TFT_GREEN);
+        _canvas->fillRect(x + split, 118, w - split, 3, TFT_RED);
 
         // 胜率预估：把 AI 的优势映射成 5%~95%
         int32_t adv = _score[2] - _score[1];
@@ -2595,10 +2963,14 @@ void AppGomoku::drawInfoPanel(int x, int w) {
         if (ai_rate > 95) ai_rate = 95;
         int my_rate = 100 - ai_rate;
 
+        /* 胜率上移到 y=66: 原来在 99, 正好落在右下角骂人文字那两行的位置上。
+         * 局终(尤其输棋会出 3 行嘴炮)不再显示胜率 —— 已经分出胜负, 没意义。 */
         _canvas->setFont(&fonts::efontCN_12);
         _canvas->setTextColor(my_rate >= 50 ? TFT_GREEN : TFT_RED);
-        _canvas->setCursor(x + 2, 120);
-        _canvas->printf("你%d%%", my_rate);
+        if (!_game_over) {
+            _canvas->setCursor(x + 2, 66);
+            _canvas->printf("你%d%%", my_rate);
+        }
     }
 }
 
@@ -2628,6 +3000,18 @@ int AppGomoku::resolveTauntLines(const char** lines) {
     }
     if (_taunt_kind == 1) {
         for (int i = 0; i < 2; i++) lines[i] = kTauntLong[_taunt_index % kTauntLongN][i];
+        return 2;
+    }
+    if (_taunt_kind == 6) {
+        for (int i = 0; i < 2; i++) lines[i] = kTauntBlocked[_taunt_index % kTauntBlockedN][i];
+        return 2;
+    }
+    if (_taunt_kind == 7) {
+        for (int i = 0; i < 2; i++) lines[i] = kTauntNearWin[_taunt_index % kTauntNearWinN][i];
+        return 2;
+    }
+    if (_taunt_kind == 8) {
+        for (int i = 0; i < 2; i++) lines[i] = kTauntDanger[_taunt_index % kTauntDangerN][i];
         return 2;
     }
     if (_taunt_index >= 300) {
@@ -2801,10 +3185,12 @@ void AppGomoku::drawBoard() {
             int cx = START_X + c * CELL_SIZE + CELL_SIZE / 2;
             int cy = START_Y + r * CELL_SIZE + CELL_SIZE / 2;
             if (_board[r][c] == 1) {
-                _canvas->fillCircle(cx, cy, CELL_SIZE / 2 - 1, TFT_BLACK);
+                // 黑子画满整格并加一圈浅灰描边, 在密集网格里也能一眼看出是"子"
+                _canvas->fillCircle(cx, cy, CELL_SIZE / 2, TFT_BLACK);
+                _canvas->drawCircle(cx, cy, CELL_SIZE / 2, 0x7BEF);
             } else if (_board[r][c] == 2) {
-                _canvas->fillCircle(cx, cy, CELL_SIZE / 2 - 1, TFT_WHITE);
-                _canvas->drawCircle(cx, cy, CELL_SIZE / 2 - 1, TFT_BLACK);
+                _canvas->fillCircle(cx, cy, CELL_SIZE / 2, TFT_WHITE);
+                _canvas->drawCircle(cx, cy, CELL_SIZE / 2, TFT_BLACK);
             }
         }
     }
@@ -2824,19 +3210,20 @@ void AppGomoku::drawBoard() {
         }
     }
 
-    // 最后一步高亮（回放时高亮刚摆上去的那手）
+    // 最后一步高亮：贴着棋子画一圈青环，不再画整格空心框（整格空心框会和光标混淆，
+    // 而且框内大片留白会让人以为这格是空的）
     if (_replay_active) {
         if (_replay_idx > 0) {
             Move& lm = _replay_moves[_replay_idx - 1];
-            int lx = START_X + lm.c * CELL_SIZE;
-            int ly = START_Y + lm.r * CELL_SIZE;
-            _canvas->drawRect(lx, ly, CELL_SIZE, CELL_SIZE, TFT_CYAN);
+            int lx = START_X + lm.c * CELL_SIZE + CELL_SIZE / 2;
+            int ly = START_Y + lm.r * CELL_SIZE + CELL_SIZE / 2;
+            _canvas->drawCircle(lx, ly, CELL_SIZE / 2 + 1, TFT_CYAN);
         }
     } else if (!_move_history.empty()) {
         Move lm = _move_history.back();
-        int lx = START_X + lm.c * CELL_SIZE;
-        int ly = START_Y + lm.r * CELL_SIZE;
-        _canvas->drawRect(lx, ly, CELL_SIZE, CELL_SIZE, TFT_CYAN);
+        int lx = START_X + lm.c * CELL_SIZE + CELL_SIZE / 2;
+        int ly = START_Y + lm.r * CELL_SIZE + CELL_SIZE / 2;
+        _canvas->drawCircle(lx, ly, CELL_SIZE / 2 + 1, TFT_CYAN);
     }
 
     // 作弊辅助: 黄色圈标出建议落子点
@@ -2847,11 +3234,32 @@ void AppGomoku::drawBoard() {
         _canvas->drawCircle(hx, hy, CELL_SIZE / 2, TFT_YELLOW);
     }
 
-    // 光标（回放时不画）
+    // 光标（回放时不画）：四角括号而不是整格方框，避免和棋子/最后一手混淆
     if (!_replay_active) {
-        int cx = START_X + _cursor_x * CELL_SIZE + CELL_SIZE / 2;
-        int cy = START_Y + _cursor_y * CELL_SIZE + CELL_SIZE / 2;
-        _canvas->drawRect(cx - CELL_SIZE / 2, cy - CELL_SIZE / 2, CELL_SIZE, CELL_SIZE, TFT_RED);
+        int x0 = START_X + _cursor_x * CELL_SIZE;
+        int y0 = START_Y + _cursor_y * CELL_SIZE;
+        int x1 = x0 + CELL_SIZE - 1;
+        int y1 = y0 + CELL_SIZE - 1;
+        _canvas->drawFastHLine(x0, y0, 3, TFT_GREEN);
+        _canvas->drawFastVLine(x0, y0, 3, TFT_GREEN);
+        _canvas->drawFastHLine(x1 - 2, y0, 3, TFT_GREEN);
+        _canvas->drawFastVLine(x1, y0, 3, TFT_GREEN);
+        _canvas->drawFastHLine(x0, y1, 3, TFT_GREEN);
+        _canvas->drawFastVLine(x0, y1 - 2, 3, TFT_GREEN);
+        _canvas->drawFastHLine(x1 - 2, y1, 3, TFT_GREEN);
+        _canvas->drawFastVLine(x1, y1 - 2, 3, TFT_GREEN);
+    }
+
+    // 落子被拒提示：贴在棋盘下沿，不压左右栏
+    if ((int32_t)(GetHAL().millis() - s_cell_tip_until) < 0) {
+        int ty = START_Y + BOARD_PIXEL_SIZE + 2;
+        if (ty > _canvas->height() - 12) ty = _canvas->height() - 12;
+        _canvas->fillRect(START_X - 3, ty - 1, 60, 12, TFT_BLACK);
+        _canvas->drawRect(START_X - 3, ty - 1, 60, 12, TFT_YELLOW);
+        _canvas->setFont(&fonts::efontCN_10);
+        _canvas->setTextColor(TFT_YELLOW);
+        _canvas->setCursor(START_X, ty);
+        _canvas->print("这格有子了");
     }
 
     int screen_w = _canvas->width();
@@ -2860,20 +3268,20 @@ void AppGomoku::drawBoard() {
     int right_x = START_X + BOARD_PIXEL_SIZE + 4;
     int right_w = screen_w - right_x;
 
-    _canvas->setFont(&fonts::Font0);
+    _canvas->setFont(&fonts::efontCN_10);
     _canvas->setTextSize(1);
 
     // ---------- 左栏 ----------
     int y = 2;
-    _canvas->setFont(&fonts::efontCN_10_b);
+    _canvas->setFont(&fonts::efontCN_10);
     _canvas->setTextColor(TFT_CYAN);
     _canvas->setCursor(left_x, y);
     _canvas->print("五子棋");
-    _canvas->setFont(&fonts::Font0);
+    _canvas->setFont(&fonts::efontCN_10);
 
     if (_pvp) {
         // 双人对战: 左栏换成对战状态, 单人那套 Lv/星级/YOU/AI/WIN 全隐藏
-        _canvas->setFont(&fonts::efontCN_10_b);
+        _canvas->setFont(&fonts::efontCN_10);
         _canvas->setTextColor(TFT_CYAN);
         _canvas->setCursor(left_x, 14); _canvas->print(_net_pvp ? "联机对战" : "双人对战");
         _canvas->setTextColor(TFT_WHITE);
@@ -2893,14 +3301,14 @@ void AppGomoku::drawBoard() {
             _canvas->setCursor(left_x, 68);
             _canvas->print((!_net_started || _game_over) ? "Enter准备" : "C嘲讽");
         }
-        _canvas->setFont(&fonts::Font0);
+        _canvas->setFont(&fonts::efontCN_10);
     } else {
-    y = 13;
+    y = 11;
     _canvas->setTextColor(TFT_WHITE);
     _canvas->setCursor(left_x, y);
     _canvas->printf("Lv.%d", _difficulty);
 
-    y = 22;
+    y = 20;
     _canvas->setTextColor(TFT_YELLOW);
     for (int row = 0; row < 2; row++) {
         _canvas->setCursor(left_x, y);
@@ -2914,7 +3322,7 @@ void AppGomoku::drawBoard() {
     int total_games = s_player_wins + s_ai_wins;
     int ai_rate = (total_games > 0) ? (s_ai_wins * 100 / total_games) : 0;
 
-    y = 39;
+    y = 36;
     _canvas->setTextColor(TFT_GREEN);
     _canvas->setCursor(left_x, y); _canvas->printf("YOU%2d", s_player_wins); y += 8;
     _canvas->setTextColor(TFT_ORANGE);
@@ -2938,82 +3346,111 @@ void AppGomoku::drawBoard() {
     }
     y += 9;
 
-    _canvas->setTextColor(TFT_LIGHTGREY);
-    _canvas->setCursor(left_x, y); _canvas->print(_pvp ? "PVP" : (_is_ai_assist_mode ? "Assist" : "Normal"));
+    }
+
+    // ---------- 棋盘下方: 主界面操作提示 ----------
+    // 以前主界面只有 H=帮助, 第一次上手的人不知道方向键是 E/S/A/D、也不知道回车落子。
+    if (!_net_started) {
+        _canvas->setFont(&fonts::efontCN_10);
+        _canvas->setTextColor(TFT_LIGHTGREY);
+        const char* hint = "E/S/A/D 移 Enter 落子";
+        int tw = _canvas->textWidth(hint);
+        _canvas->setCursor(START_X + (BOARD_PIXEL_SIZE - tw) / 2, START_Y + BOARD_PIXEL_SIZE + 3);
+        _canvas->print(hint);
     }
 
     // ---------- 左下角：密集状态区 ----------
+    // 画布只有 121 高(顶部 14px 让给内联状态条), 这里用 9px 行距把 5 行统计留在底部
     char stbuf[24];
-    int hy = screen_h - 52;
+    /* 行距 10px, 末行 ink 只有 9 行: 起点 71 时"成就0/6"正好压到画布最后一行,
+     * 看着像被切掉。整体上移 2px。 */
+    int hy = 69;
 
-    _canvas->setFont(&fonts::efontCN_10_b);
+    _canvas->setFont(&fonts::efontCN_10);
     _canvas->setTextColor(TFT_YELLOW);
     _canvas->setCursor(left_x, hy);
-    _canvas->print("[H]帮助");
+    _canvas->print("H=帮助");
 
     _canvas->setTextColor(s_streak > 0 ? TFT_GREEN : TFT_DARKGREY);
-    _canvas->setCursor(left_x, hy + 11);
+    _canvas->setCursor(left_x, hy + 10);
     snprintf(stbuf, sizeof(stbuf), "连胜%d 最%d", s_streak, s_best_streak);
     _canvas->print(stbuf);
 
     // 钟 / 计时
-    _canvas->setFont(&fonts::Font0);
+    _canvas->setFont(&fonts::efontCN_10);
     if (_blitz) {
         int cs = _game_over ? 0 : (_clock_ms[_current_player] / 1000);
         _canvas->setTextColor((!_game_over && _clock_ms[_current_player] < 10000) ? TFT_RED : TFT_CYAN);
-        _canvas->setCursor(left_x, hy + 22);
+        _canvas->setCursor(left_x, hy + 20);
         snprintf(stbuf, sizeof(stbuf), "CLK %d", cs);
     } else {
         uint32_t gt = (GetHAL().millis() - _game_start_ms) / 1000;
         _canvas->setTextColor(TFT_CYAN);
-        _canvas->setCursor(left_x, hy + 22);
+        _canvas->setCursor(left_x, hy + 20);
         snprintf(stbuf, sizeof(stbuf), "T %d:%02d", (int)(gt / 60), (int)(gt % 60));
     }
     _canvas->print(stbuf);
 
     // 失误 / 最险
-    _canvas->setFont(&fonts::efontCN_10_b);
+    _canvas->setFont(&fonts::efontCN_10);
     _canvas->setTextColor(TFT_LIGHTGREY);
-    _canvas->setCursor(left_x, hy + 31);
+    _canvas->setCursor(left_x, hy + 30);
     snprintf(stbuf, sizeof(stbuf), "误%d 险%d", _blunders, _min_danger == 999 ? 0 : _min_danger);
     _canvas->print(stbuf);
 
     // 成就进度
     int achv_n = 0;
     for (int i = 0; i < 6; i++) if (_achv & (1u << i)) achv_n++;
-    _canvas->setTextColor(achv_n >= 6 ? TFT_YELLOW : TFT_DARKGREY);
-    _canvas->setCursor(left_x, hy + 41);
+    _canvas->setTextColor(achv_n >= 6 ? TFT_YELLOW : 0x8410);
+    _canvas->setCursor(left_x, hy + 40);
     snprintf(stbuf, sizeof(stbuf), "成就%d/6", achv_n);
     _canvas->print(stbuf);
-    _canvas->setFont(&fonts::Font0);
+    _canvas->setFont(&fonts::efontCN_10);
 
     // ---------- 右栏：危险提示 + 趋势 + 嘲讽 ----------
-    int ry = 7;
     if (_show_panel) {
         drawInfoPanel(right_x, right_w);
-        ry = 79;
     }
 
     // 联机对战: 自己发的嘲讽只发给对方, 不在自己屏幕上显示
-    if (_taunt_visible && !_win_anim_active && !(_pvp && !_taunt_from_remote)) {
-        _canvas->setFont(&fonts::efontCN_14);
-        _canvas->setTextColor(_taunt_kind == 4 ? TFT_CYAN : (_taunt_kind == 2 ? TFT_MAGENTA : (_taunt_kind == 1 ? TFT_ORANGE : TFT_RED)));
-
+    /* 红字嘴炮必须无条件画 —— 之前的条件是 `_taunt_visible && !_show_panel`,
+     * 而 _show_panel 默认就是 true(G 键才关面板), 于是单人局从头到尾一次都画
+     * 不出来, 玩家以为"AI 不骂人了"。
+     * 位置仍在右下角原处(贴棋盘下沿), 但不铺底色/不画边框: 只留文字,
+     * 用 1px 黑描边保证压在深色棋格上也看得清。 */
+    if (_taunt_visible && !_win_anim_active && !(_pvp && !_taunt_from_remote) &&
+        !_result_visible && !_cheat_alert) {
         const char* lines[3];
         int nl = resolveTauntLines(lines);
+        if (nl > 3) nl = 3;
 
-        int ty = ry;
+        _canvas->setFont(&fonts::efontCN_12);
+        const int lh = 13;
+        int boxh = nl * lh;
+        int by = START_Y + BOARD_PIXEL_SIZE - 1 - boxh;   // 文字块底边贴棋盘下沿
+        if (by < 2) by = 2;
+        uint16_t col = (_taunt_kind == 4) ? TFT_CYAN
+                     : (_taunt_kind == 2) ? TFT_MAGENTA
+                     : (_taunt_kind == 1) ? TFT_ORANGE
+                     : TFT_RED;
+
         for (int i = 0; i < nl; i++) {
             const char* line = lines[i];
             if (!line) break;
             int tw = _canvas->textWidth(line);
             int tx = right_x + (right_w - tw) / 2;
             if (tx < right_x) tx = right_x;
-            _canvas->setCursor(tx, ty);
-            _canvas->print(line);
-            ty += 15;
+            int ty = by + i * lh;
+            // 四向 1px 描边(不要色块): 黑格/白格上都能读
+            _canvas->setTextColor(TFT_BLACK);
+            _canvas->setCursor(tx - 1, ty); _canvas->print(line);
+            _canvas->setCursor(tx + 1, ty); _canvas->print(line);
+            _canvas->setCursor(tx, ty - 1); _canvas->print(line);
+            _canvas->setCursor(tx, ty + 1); _canvas->print(line);
+            _canvas->setTextColor(col);
+            _canvas->setCursor(tx, ty); _canvas->print(line);
         }
-        _canvas->setFont(&fonts::Font0);
+        _canvas->setFont(&fonts::efontCN_10);
     }
 
     // ---------- 胜利动画 ----------
@@ -3025,20 +3462,20 @@ void AppGomoku::drawBoard() {
         _canvas->fillRect(bx, by, bw, 32, TFT_BLACK);
         _canvas->drawRect(bx, by, bw, 32, TFT_YELLOW);
 
-        _canvas->setFont(&fonts::efontCN_10_b);
+        _canvas->setFont(&fonts::efontCN_10);
         _canvas->setTextDatum(middle_center);
         int cxm = bx + bw / 2;
 
         if (el < 600) {
             _canvas->setTextColor(TFT_GREEN);
             _canvas->drawString("你赢了！", cxm, by + 11);
-            _canvas->setFont(&fonts::Font0);
+            _canvas->setFont(&fonts::efontCN_10);
             _canvas->setTextColor(TFT_WHITE);
             _canvas->drawString("WIN", cxm, by + 24);
         } else if (el < 1200) {
             _canvas->setTextColor(TFT_YELLOW);
             _canvas->drawString("难度提升", cxm, by + 11);
-            _canvas->setFont(&fonts::Font0);
+            _canvas->setFont(&fonts::efontCN_10);
             char stars[16];
             int n = (_difficulty < 10) ? _difficulty + 1 : 10;
             for (int i = 0; i < n && i < 15; i++) stars[i] = '*';
@@ -3051,13 +3488,13 @@ void AppGomoku::drawBoard() {
             _canvas->drawString(buf, cxm, by + 13);
         }
 
-        _canvas->setFont(&fonts::Font0);
+        _canvas->setFont(&fonts::efontCN_10);
         _canvas->setTextDatum(top_left);
     }
 
     // ---------- R 重开确认提示 ----------
     if (_r_confirm_ms) {
-        _canvas->setFont(&fonts::efontCN_10_b);
+        _canvas->setFont(&fonts::efontCN_10);
         const char* tip = "再按R确认重开";
         int tw = _canvas->textWidth(tip) + 8;
         int bx = START_X + (BOARD_PIXEL_SIZE - tw) / 2;
@@ -3066,14 +3503,14 @@ void AppGomoku::drawBoard() {
         _canvas->setTextColor(TFT_RED);
         _canvas->setCursor(bx + 4, START_Y + 3);
         _canvas->print(tip);
-        _canvas->setFont(&fonts::Font0);
+        _canvas->setFont(&fonts::efontCN_10);
     }
 
     // ---------- 回放横幅 ----------
     if (_replay_active) {
         char rb[24];
         snprintf(rb, sizeof(rb), "回放 %d/%d", _replay_idx, (int)_replay_moves.size());
-        _canvas->setFont(&fonts::efontCN_10_b);
+        _canvas->setFont(&fonts::efontCN_10);
         int bw2 = _canvas->textWidth(rb) + 8;
         int bx = START_X + (BOARD_PIXEL_SIZE - bw2) / 2;
         _canvas->fillRect(bx, START_Y + 2, bw2, 13, TFT_BLACK);
@@ -3081,13 +3518,13 @@ void AppGomoku::drawBoard() {
         _canvas->setTextColor(TFT_CYAN);
         _canvas->setCursor(bx + 4, START_Y + 3);
         _canvas->print(rb);
-        _canvas->setFont(&fonts::Font0);
+        _canvas->setFont(&fonts::efontCN_10);
     }
 
     // ---------- 作弊模式标识 ----------
     if (_cheat_mode && !_pvp && !_assess_mode && !_game_over) {
         _canvas->fillRect(1, 1, 44, 11, TFT_MAGENTA);
-        _canvas->setFont(&fonts::Font0);
+        _canvas->setFont(&fonts::efontCN_10);
         _canvas->setTextColor(TFT_WHITE);
         _canvas->setCursor(3, 2);
         _canvas->print("CHEAT");
@@ -3097,7 +3534,7 @@ void AppGomoku::drawBoard() {
     if (_assess_banner) {
         if (GetHAL().millis() - _assess_banner_ms < 3500) {
             const char* tip = "智力测试：作弊键已禁用";
-            _canvas->setFont(&fonts::efontCN_10_b);
+            _canvas->setFont(&fonts::efontCN_10);
             int tw = _canvas->textWidth(tip) + 10;
             int bx = (_canvas->width() - tw) / 2;
             _canvas->fillRect(bx, START_Y + 2, tw, 15, TFT_BLACK);
@@ -3105,7 +3542,7 @@ void AppGomoku::drawBoard() {
             _canvas->setTextColor(TFT_CYAN);
             _canvas->setCursor(bx + 5, START_Y + 4);
             _canvas->print(tip);
-            _canvas->setFont(&fonts::Font0);
+            _canvas->setFont(&fonts::efontCN_10);
         } else {
             _assess_banner = false;
         }
@@ -3125,7 +3562,7 @@ void AppGomoku::drawBoard() {
     drawCheatBanner(GetHAL().millis());
 
     heapProbe("pre_push");
-    _canvas->pushSprite(0, 0);
+    appCanvasPush(_canvas);
 
     // 状态同步到 C3 监视器(内部判断连接状态)
     sendMirrorState();
@@ -3139,7 +3576,7 @@ void AppGomoku::unlockAchv(int bit) {
 
 // 帮助界面：列出全部键位说明
 void AppGomoku::drawHelp() {
-    int w = 190, h = 112;
+    int w = 190, h = 116;
     int x = (_canvas->width() - w) / 2;
     int yy = (_canvas->height() - h) / 2;
     _canvas->fillRect(x, yy, w, h, 0x0000);
@@ -3152,7 +3589,7 @@ void AppGomoku::drawHelp() {
 
     _canvas->setTextColor(TFT_WHITE);
     static const char* kHelp[] = {
-        "方向/回车  走子落子",
+        "E/S/A/D 移动 回车落子",
         "X 危险标记  K AI性格",
         "G 面板      L 难度",
         "M 辅助      U 悔棋",
@@ -3161,8 +3598,10 @@ void AppGomoku::drawHelp() {
         "H 本帮助    I 智力测试",
         "Y 作弊模式  1/2/3 作弊",
     };
+    // 之前 12px 字配 11px 行距, 8 行互相压字; 改成 10px 字 + 12px 行距
+    _canvas->setFont(&fonts::efontCN_10);
     for (int i = 0; i < 8; i++) {
-        _canvas->setCursor(x + 8, yy + 19 + i * 11);
+        _canvas->setCursor(x + 8, yy + 18 + i * 12);
         _canvas->print(kHelp[i]);
     }
 }
@@ -3199,7 +3638,9 @@ void AppGomoku::drawResult() {
     _canvas->setCursor(x + 8, y + 24);
     _canvas->print(buf);
 
-    snprintf(buf, sizeof(buf), "AI作弊 %d 次  最险 %d 步", _cheat_count, (_min_danger == 999) ? 0 : _min_danger);
+    /* 这一行原来带空格("AI作弊 0 次  最险 60 步"), 会一直压到面板右半
+     * 那块留给 AI 骂人的区域去, 去掉空格收窄到 x+116 以内。 */
+    snprintf(buf, sizeof(buf), "AI作弊%d次 最险%d步", _cheat_count, (_min_danger == 999) ? 0 : _min_danger);
     _canvas->setCursor(x + 8, y + 38);
     _canvas->print(buf);
 
@@ -3208,7 +3649,10 @@ void AppGomoku::drawResult() {
     _canvas->print(buf);
 
     // 复盘：这局你有几手没下在要点上
-    if (_worst_move_no > 0) {
+    /* 必须用 _blunders 判断: 之前只看 _worst_move_no, 而它任何微小扣分都会记
+     * (Lv.1 实测 loss=108 也记了), 于是面板打出"失误 0 手 最大第 9 手" ——
+     * 自己的两句话互相打架。没有真正的失误手就只报"全程无破绽"。 */
+    if (_blunders > 0 && _worst_move_no > 0) {
         snprintf(buf, sizeof(buf), "失误 %d 手  最大第 %d 手", _blunders, _worst_move_no);
     } else {
         snprintf(buf, sizeof(buf), "失误 0 手  全程无破绽");
@@ -3217,25 +3661,67 @@ void AppGomoku::drawResult() {
     _canvas->setCursor(x + 8, y + 66);
     _canvas->print(buf);
 
+    // 必挡·无奈: 已经锁死之后的被迫挡五, 和"最大失误"分开显示
+    if (_futile_cnt > 0) {
+        snprintf(buf, sizeof(buf), "必挡·无奈 %d 手 第 %d 手起", _futile_cnt, _futile_first);
+        _canvas->setTextColor(0xFD20);   // 橙
+        _canvas->setCursor(x + 8, y + 80);
+        _canvas->print(buf);
+    }
+
     // 成就
     static const char* kAchvName[6] = { "首胜", "反杀", "屠龙", "三连", "零作弊", "无失误" };
-    int ax = x + 8, ay = y + 82;
-    bool any = false;
+    int ax = x + 8, ay = y + 88;      // 只排一行: 底部要留给按键提示
     _canvas->setTextColor(TFT_YELLOW);
     for (int i = 0; i < 6; i++) {
         if (!(_achv_new & (1 << i))) continue;
         int tw = _canvas->textWidth(kAchvName[i]);
-        if (ax + tw > x + w - 8) { ax = x + 8; ay += 14; }
+        if (ax + tw > x + w - 8) break;   // 放不下就不再排, 绝不打到下一行去压提示
         _canvas->setCursor(ax, ay);
         _canvas->print(kAchvName[i]);
         ax += tw + 8;
-        any = true;
     }
-    if (!any) {
-        _canvas->setTextColor(TFT_DARKGREY);
-        _canvas->setCursor(x + 8, y + 86);
-        _canvas->print("R 重开  V 回放  L 难度");
+
+    // ---------- 右侧空白: AI 骂人的话 ----------
+    /* 面板左半是战报, 右半(约 x+136 起, 宽 70)一直是空的。
+     * 把局终嘴炮放这里: 12px 字体最多 6 字 = 72px, 竖排 3 行, 不裁切。 */
+    if (!_pvp && _taunt_visible) {
+        const char* tl[3];
+        int nn = resolveTauntLines(tl);
+        if (nn > 3) nn = 3;
+        _canvas->setFont(&fonts::efontCN_12);
+        _canvas->setTextColor(TFT_RED);
+        int rx = x + 136;
+        int rw = x + w - 6 - rx;
+        for (int i = 0; i < nn; i++) {
+            if (!tl[i]) break;
+            int tw = _canvas->textWidth(tl[i]);
+            int tx = rx + (rw - tw) / 2;
+            if (tx < rx) tx = rx;
+            _canvas->setCursor(tx, y + 26 + i * 15);
+            _canvas->print(tl[i]);
+        }
+        _canvas->setFont(&fonts::efontCN_10);
     }
+
+    // ---------- 底部: 按键提示(左) + 下一局倒计时(右) ----------
+    _canvas->setFont(&fonts::efontCN_10);
+    /* 深灰字在近黑面板上几乎看不见, 玩家结算后不知道能按什么继续 —— 改浅灰 */
+    _canvas->setTextColor(TFT_LIGHTGREY);
+    _canvas->setCursor(x + 8, y + 100);
+    _canvas->print("R重开 V回放 U悔棋");
+
+    if (_next_game_ms) {
+        uint32_t nowm = GetHAL().millis();
+        int left_s = (_next_game_ms > nowm) ? (int)((_next_game_ms - nowm) / 1000 + 1) : 0;
+        char cb[20];
+        snprintf(cb, sizeof(cb), "下一局 %ds", left_s);
+        int tw = _canvas->textWidth(cb);
+        _canvas->setTextColor(TFT_CYAN);
+        _canvas->setCursor(x + w - 6 - tw, y + 100);
+        _canvas->print(cb);
+    }
+    _canvas->setFont(&fonts::efontCN_10);
 }
 
 // ================= 智力测试（评估模式）=================
@@ -3413,43 +3899,65 @@ void AppGomoku::drawAssessResult() {
     _canvas->print("R 重开   V 回放   I 退出测试");
 }
 
-// 作弊问责选择题(画在棋盘上, 由 app_task 统一绘制)
+// 作弊问责条(画在棋盘上, 由 app_task 统一绘制)
+/* 以前是 200x64 的大块居中弹窗: 棋盘中部整片被盖住, 玩家看不见自己的棋。
+ * 现在压成棋盘下沿外的一条(14px), 10px 字号, 不遮棋盘、不挤压布局;
+ * 红字骂句每次随机, YES/NO 用左右键切换、回车确认, 逻辑不变。 */
 void AppGomoku::drawCheatDialog() {
     if (!_canvas || !_canvas->getBuffer()) return;
 
-    int w = 200, h = 64;
-    int x = (_canvas->width() - w) / 2;
-    int y = (_canvas->height() - h) / 2;
+    int sy = START_Y + BOARD_PIXEL_SIZE + 1;   // 棋盘下沿之外那一条(约 14px)
+    int sh = _canvas->height() - sy;
+    if (sh < 12) { sy = _canvas->height() - 12; sh = 12; }
 
-    _canvas->fillRect(x, y, w, h, 0x0000);
-    _canvas->drawRect(x, y, w, h, TFT_RED);
-    _canvas->drawRect(x + 1, y + 1, w - 2, h - 2, 0x2104);
+    /* 左边 0..55 是左下角统计列的"成就0/6"那一行(y=108), 条带从这里之后开始,
+     * 才不会把原有的底部状态压掉。
+     * 不铺底色(黑块会盖住棋盘下沿的观感), 文字带 1px 黑描边保证可读。 */
+    const int sx = 56;
 
-    _canvas->setFont(&fonts::efontCN_12);
-    _canvas->setTextDatum(middle_center);
-    _canvas->setTextColor(TFT_WHITE, 0x0000);
-    _canvas->drawString("你刚刚是不是按了个什么按键？", x + w / 2, y + 12);
+    _canvas->setTextDatum(top_left);
+    _canvas->setFont(&fonts::efontCN_10);
 
-    const int bw = 54, bh = 18, by = y + 24;
-    int yx = x + 20;
-    int nx = x + w - 20 - bw;
+    if (_cheat_alert == 1) {
+        // 冻结中的 1.5 秒: 先只给一句话, 不给按钮
+        const char* tip = "AI 正在盯着你…（禁止落子）";
+        _canvas->setTextColor(TFT_BLACK);
+        _canvas->drawString(tip, sx + 2, sy + 3);
+        _canvas->drawString(tip, sx + 4, sy + 3);
+        _canvas->drawString(tip, sx + 3, sy + 2);
+        _canvas->drawString(tip, sx + 3, sy + 4);
+        _canvas->setTextColor(TFT_ORANGE);
+        _canvas->drawString(tip, sx + 3, sy + 3);
+        return;
+    }
+
+    // 随机骂句(最长 6 字 = 60px, 到 x=119, 不会撞到右边按钮)
+    const char* ask = kCheatAsk[_cheat_ask_idx % kCheatAskN];
+    _canvas->setTextColor(TFT_BLACK);
+    _canvas->drawString(ask, sx + 2, sy + 3);
+    _canvas->drawString(ask, sx + 4, sy + 3);
+    _canvas->drawString(ask, sx + 3, sy + 2);
+    _canvas->drawString(ask, sx + 3, sy + 4);
+    _canvas->setTextColor(TFT_RED);
+    _canvas->drawString(ask, sx + 3, sy + 3);
+
+    const int bw = 28, bh = 11, by = sy + 1;
+    int yx = 130, nx = yx + bw + 4;
 
     bool yes_sel = (_cheat_sel == 0);
-    _canvas->fillRect(yx, by, bw, bh, yes_sel ? TFT_YELLOW : 0x18E3);
+    if (yes_sel) _canvas->fillRect(yx, by, bw, bh, TFT_YELLOW);
     _canvas->drawRect(yx, by, bw, bh, yes_sel ? TFT_WHITE : TFT_DARKGREY);
-    _canvas->setTextColor(yes_sel ? TFT_BLACK : TFT_WHITE, yes_sel ? TFT_YELLOW : 0x18E3);
+    _canvas->setTextDatum(middle_center);
+    _canvas->setTextColor(yes_sel ? TFT_BLACK : TFT_WHITE);
     _canvas->drawString("YES", yx + bw / 2, by + bh / 2);
 
     bool no_sel = (_cheat_sel == 1);
-    _canvas->fillRect(nx, by, bw, bh, no_sel ? TFT_YELLOW : 0x18E3);
+    if (no_sel) _canvas->fillRect(nx, by, bw, bh, TFT_YELLOW);
     _canvas->drawRect(nx, by, bw, bh, no_sel ? TFT_WHITE : TFT_DARKGREY);
-    _canvas->setTextColor(no_sel ? TFT_BLACK : TFT_WHITE, no_sel ? TFT_YELLOW : 0x18E3);
+    _canvas->setTextColor(no_sel ? TFT_BLACK : TFT_WHITE);
     _canvas->drawString("NO", nx + bw / 2, by + bh / 2);
 
-    _canvas->setFont(&fonts::efontCN_10);
-    _canvas->setTextColor((_cheat_alert == 1) ? TFT_ORANGE : TFT_LIGHTGREY, 0x0000);
-    _canvas->drawString((_cheat_alert == 1) ? "AI 正在盯着你…（禁止落子）" : "左右选择   Enter 确认",
-                        x + w / 2, y + h - 10);
-
+    _canvas->setTextColor(TFT_LIGHTGREY);
+    _canvas->drawString("<>回车", nx + bw + 4, sy + 3);
     _canvas->setTextDatum(top_left);
 }

@@ -28,6 +28,15 @@ void pump();
 // 取出一条待处理指令 (LegacyApp 消费); 无则返回空串
 std::string popPending();
 
+// 精确取走一条指定指令(自测用), 不匹配则不动队列, 返回是否取到
+bool takePending(const std::string& cmd);
+
+// 按前缀取走一条指令(自测用, 如 "ZDGO:Snake" 取回 "Snake"); 没匹配返回空串
+std::string takePendingPrefix(const std::string& prefix);
+
+// 看一眼队首指令(不取走), 用于判断"这条是不是诊断命令"
+std::string peekPending();
+
 // 待处理队列长度
 size_t pendingCount();
 

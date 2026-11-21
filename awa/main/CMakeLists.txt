@@ -24,7 +24,7 @@ file(GLOB_RECURSE MY_SRCS ${_main_glob_dep}
 )
 
 list(FILTER MY_SRCS EXCLUDE REGEX "ble_hid")  # KEEP EXCLUDED: BT disabled in sdkconfig
-# list(FILTER MY_SRCS EXCLUDE REGEX "app_legacy_app")  # RE-ENABLED: user wants legacy_app
+list(FILTER MY_SRCS EXCLUDE REGEX "app_legacy_app")  # [2.1.0] LegacyApp 已下架为模块; 代码保留, 恢复见 backup/LegacyApp_v2.0.0/RESTORE.md
 list(FILTER MY_SRCS EXCLUDE REGEX "app_brain_server")
 # list(FILTER MY_SRCS EXCLUDE REGEX "app_repl")  # RE-ENABLED: needed by main.cpp
 list(FILTER MY_SRCS EXCLUDE REGEX "app_combo")  # KEEP EXCLUDED: depends on ble_hid which needs BT

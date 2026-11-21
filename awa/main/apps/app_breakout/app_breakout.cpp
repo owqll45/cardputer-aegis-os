@@ -5,6 +5,7 @@
 #include <apps/utils/common.h>
 #include <esp_random.h>
 #include <apps/utils/glink/glink.h>
+#include <apps/utils/app_canvas.h>
 
 AppBreakout::AppBreakout() {
     setAppInfo().name = "Breakout";
@@ -20,15 +21,10 @@ AppBreakout::~AppBreakout() {
 void AppBreakout::onOpen() {
     mclog::tagInfo(getAppInfo().name, "Application opened");
 
-    // 本应用自己全屏绘制, 先释放共享画布(52KB)降低内存峰值, 退出时 launcher 会重建
+    // 本应用自己全屏绘制, 先释放共享画布(52KB)降低内存峰值
     GetHAL().canvas().deleteSprite();
     _canvas = new LGFX_Sprite(&GetHAL().display());
-    _canvas->setColorDepth(8);
-    _canvas->setPsram(false);
-    if (!_canvas->createSprite(240, 135)) {
-        mclog::tagError(getAppInfo().name, "Failed to create sprite, fallback");
-        _canvas->createSprite(GetHAL().display().width(), 109);
-    }
+    appCanvasBegin(_canvas, getAppInfo().name);
     
     _lives = 3;
     _score = 0;
@@ -207,6 +203,8 @@ void AppBreakout::onClose() {
         delete _canvas;
         _canvas = nullptr;
     }
+    // 统一恢复系统画布（16bpp / 109 高）
+    appCanvasRestore(getAppInfo().name);
 }
 
 void AppBreakout::updateUI() {
@@ -245,7 +243,7 @@ void AppBreakout::updateUI() {
     }
     _canvas->setTextDatum(top_left);
 
-    _canvas->pushSprite(0, 0);
+    appCanvasPush(_canvas);
     sendMirrorState();
 }
 

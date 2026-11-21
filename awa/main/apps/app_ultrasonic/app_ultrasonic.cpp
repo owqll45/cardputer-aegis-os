@@ -102,7 +102,7 @@ void AppUltrasonic::drawDisplay() {
     if (_distance < 10) { level = "非常近"; color = UI_BAD; }
     else if (_distance < 30) { level = "较近"; color = UI_WARN; }
 
-    cv.setFont(&fonts::efontCN_10_b);
+    cv.setFont(&fonts::efontCN_10);
     cv.setTextColor(color);
     cv.setTextDatum(top_center);
     cv.drawString(level, 52, 80);
@@ -124,7 +124,7 @@ void AppUltrasonic::drawTrendGraph() {
     cv.fillRoundRect(gx, gy, gw, gh, 5, UI_CARD);
     cv.drawRoundRect(gx, gy, gw, gh, 5, UI_LINE);
 
-    cv.setFont(&fonts::efontCN_10_b);
+    cv.setFont(&fonts::efontCN_10);
     cv.setTextColor(UI_SUB);
     cv.setCursor(gx + 5, gy + 2);
     cv.print("距离趋势");

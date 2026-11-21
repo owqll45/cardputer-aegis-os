@@ -1,5 +1,6 @@
 #pragma once
 #include <mooncake.h>
+#include <M5GFX.h>
 #include <string>
 #include <vector>
 
@@ -21,6 +22,8 @@ public:
 
 private:
     int _key_event_slot_id = -1;
+    LGFX_Sprite* _canvas = nullptr;
+    bool _want_close = false;
 
     std::string _expr;
     int _caret = 0;

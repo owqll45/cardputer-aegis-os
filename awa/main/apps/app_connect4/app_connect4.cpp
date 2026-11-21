@@ -366,9 +366,8 @@ void AppConnect4::onClose() {
     if (_handle_key_event_slot_id >= 0) GetHAL().keyboard.onKeyEvent.disconnect(_handle_key_event_slot_id);
     glink_release();
 
-    _canvas = &GetHAL().canvas();
-    _canvas->deleteSprite();
-    _canvas->createSprite(GetHAL().display().width(), 109);
+    // 统一恢复系统画布（16bpp / 109 高）
+    appCanvasRestore(getAppInfo().name);
     _canvas = nullptr;
 }
 
@@ -401,7 +400,7 @@ void AppConnect4::draw() {
         const char* hs = (glink_remote_flags() & 0x01) ? "手柄已连接" : "手柄未连接";
         _canvas->setCursor((w - _canvas->textWidth(hs)) / 2, h - 20);
         _canvas->print(hs);
-        _canvas->pushSprite(0, 0);
+        appCanvasPush(_canvas);
         return;
     }
 
@@ -494,7 +493,7 @@ void AppConnect4::draw() {
         _canvas->print("A/D选 Enter落");
     }
 
-    _canvas->pushSprite(0, 0);
+    appCanvasPush(_canvas);
 }
 
 // CFSTATE: 'G','M',0x25,seq | 4-14 棋盘42格x2bit | 15 sel | 16 flags | 17 cur

@@ -50,6 +50,16 @@ private:
     uint8_t _near[BOARD_SIZE][BOARD_SIZE];   // 距离 2 内的棋子数（候选点用）
     int32_t _score[3];                       // 双方局面分（增量维护）
     int32_t _nodes = 0;
+    /* 本次 AI 落子的累计节点数。_nodes 是"单次搜索"的计数器(超限就中止),
+     * 会被 vcf/negamax 的多段搜索反复清零; 日志必须打这个累计值才可信。 */
+    int32_t _nodes_move = 0;
+    inline void resetSearchNodes() { _nodes_move += _nodes; _nodes = 0; }
+    /* 落子/音效/绘制那段耗时(placePiece 内, 含阻塞式音频播放)。
+     * 它跟搜索节点数无关, 必须从"思考耗时"里刨掉, 否则会出现
+     * "nodes=0 却耗时 500ms"这种看起来像计数坏了的假象。 */
+    uint32_t _place_ms = 0;
+    /* 是否已经记下"本局转折点"(第一手走完对手就必胜的棋) */
+    bool _worst_is_lost = false;
     int64_t _deadline_us = 0;
     int _best_r = -1;
     int _best_c = -1;
@@ -78,9 +88,11 @@ private:
     int _persona = 0;            // 0=稳健 1=凶狠 2=诡诈（K 键切换）
     int _iter_best_r = -1;       // 上一层迭代的最佳点（用于排序）
     int _iter_best_c = -1;
-    int _blunders = 0;           // 玩家本局失误手数
+    int _blunders = 0;           // 玩家本局失误手数(还能救却没救)
     int _worst_loss = 0;         // 最大一手损失
     int _worst_move_no = 0;      // 最大失误是第几手
+    int _futile_cnt = 0;         // 必挡·无奈: 已成必输局后被迫挡五的手数
+    int _futile_first = 0;       // 第一手必挡·无奈是第几手
 
     // ---- 情绪 / 连击 / 成就 / 战报 ----
     bool _help_visible = false;  // H 键帮助界面
@@ -89,6 +101,7 @@ private:
     uint32_t _game_start_ms = 0;
     bool _result_visible = false;
     uint32_t _result_ms = 0;
+    uint32_t _next_game_ms = 0;  // 结算面板右下角倒计时: 到点自动进下一局(等级已结算)
     uint16_t _achv = 0;          // 已解锁成就位
     uint16_t _achv_new = 0;      // 本局新解锁（战报显示）
     static int s_streak;         // 玩家连胜
@@ -121,6 +134,7 @@ private:
     int _cheat_alert = 0;             // 0=无 1=冻结中 2=等待 YES/NO
     uint32_t _cheat_freeze_ms = 0;
     int _cheat_sel = 0;               // 0=YES 1=NO
+    int _cheat_ask_idx = 0;           // 问责条里随机挑的那句骂
     bool _caught_deny = false;        // 这次质问选了 NO
     bool _cheat_extra_player_move = false; // 玩家版"连走两手"
     void playerCheat(int kind);
@@ -190,8 +204,10 @@ private:
     void updateMood();
     void drawResult();
     void drawHelp();
+    void dumpBoardLog(const char* why);   // 串口打印当前棋盘(作弊改盘后给自动化/取证用)
     void unlockAchv(int bit);
     void reviewPlayerMove(int r, int c);
+    bool oppForcedWin(int opp);
     int resolveTauntLines(const char** lines); // 解析当前嘲讽文本行(最多 3 行), 返回行数
     void sendMirrorState();                    // 打包全量状态发给 C3 监视器(GMKSTATE 238B)
 
@@ -244,6 +260,9 @@ private:
     int vcfDistance(int player, int maxDepth);
     bool findWinPoint(int player, int& r, int& c);
     int countWinPoints(int player, int& r, int& c);
+    /* 双四/活四杀点: 落在这里能同时造出 >=2 个成五点(对手只能挡一个, 必杀)。
+     * 传自己 = 找杀棋; 传对手 = 提前占掉他的杀点。仅十星使用。 */
+    bool decisivePoint(int p, int& r, int& c);
     bool openingBook(int& r, int& c);
     void heuristicMove(int lvl, int& br, int& bc);
     void recordTrend();
