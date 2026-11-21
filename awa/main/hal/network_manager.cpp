@@ -439,6 +439,7 @@ void NetworkManager::wifiDeinit()
 
     _is_wifi_inited    = false;
     _is_wifi_connected = false;
+    _is_ap_active      = false;
 }
 
 bool NetworkManager::wifiConnect(const std::string& ssid, const std::string& password)

@@ -1,4 +1,5 @@
 #include "app_ai.h"
+#include "app_ai_setup.h"
 #include <mooncake_log.h>
 #include <hal/hal.h>
 #include "api_config.h"
@@ -42,6 +43,12 @@ static const char* kDeepSeekModel = "deepseek-chat";
 static const char* kMimoUrl    = "https://api.xiaomimimo.com/v1/chat/completions";
 static const char* kMimoVoice  = "冰糖";
 static const char* kMimoKeyDefault = AI_MIMO_KEY;
+
+/* 给配置模块用：只回答"有没有兜底 Key"，不暴露内容。 */
+bool ai_setup_fallback_available()
+{
+    return kDeepSeekKey && kDeepSeekKey[0] != 0;
+}
 
 // 樱花配色（16 位色，8bit 画布会自动量化）
 static const uint16_t C_BG      = 0x1882;
@@ -305,13 +312,25 @@ void AppAI::onOpen()
 
     // 自动连接已保存的 WiFi（后台任务，不卡界面）
     ConfigStore::getInstance().init();
+    // 首次使用且没有保存过 Key：自动进入配置模式（开热点），
+    // 但先不连 STA，避免两个网络任务互相踩。
+    bool first_run = !AiKeySetup::hasKey();
     _was_online = GetHAL().isWifiConnected();
-    if (!_was_online) {
+    if (!first_run && !_was_online) {
         GetHAL().wifiInit();
         std::string ssid = ConfigStore::getInstance().getWifiSsid();
         if (!ssid.empty()) {
             startWifiJob(ssid, ConfigStore::getInstance().getWifiPassword());
         }
+    }
+
+    if (first_run) {
+        // 热点启动放到 onRunning，避免阻塞 onOpen
+        _state = ST_KEYCFG;
+        _want_setup = true;
+        _setup_auto = true;
+        _setup_started = false;
+        mclog::tagInfo(TAG, "no saved key, enter setup mode");
     }
 
     _key_slot = GetHAL().keyboard.onKeyEvent.connect(
@@ -341,7 +360,23 @@ void AppAI::onRunning()
         doScan();
     }
 
+    // 开热点 + 配置页也放到应用任务里，避免按键回调里长时间阻塞
+    if (_want_setup && !_job) {
+        _want_setup = false;
+        startKeyConfig(_setup_auto);
+    }
+
     uint32_t now = GetHAL().millis();
+
+    // 网页保存/清空 Key 后，设备端状态同步刷新
+    if (_state == ST_KEYCFG && _setup_started && now - _last_setup_check > 800) {
+        _last_setup_check = now;
+        bool has_key = AiKeySetup::hasKey();
+        if (has_key != _setup_key_seen) {
+            _setup_key_seen = has_key;
+            _dirty = true;
+        }
+    }
 
     // 录音后画布可能因内存碎片只能恢复成 109 高（底部会露出旧画面）；
     // 等内存稳定后每秒重试一次，恢复到整屏 135 高。
@@ -428,6 +463,13 @@ void AppAI::onClose()
         vTaskDelay(pdMS_TO_TICKS(150));  // 让后台任务自行收尾（麦克风/播放）
     }
 
+    // 配置模式退出：先关网页服务再关热点
+    if (_setup_started || AiKeySetup::isActive()) {
+        AiKeySetup::stop();
+    }
+    _setup_started = false;
+    _want_setup = false;
+
     GetHAL().speaker.stop();
 
     if (_canvas) {
@@ -447,6 +489,11 @@ void AppAI::handleKey(const Keyboard::KeyEvent_t& ke)
 
     if (_state == ST_SETTINGS) {
         handleSettingsKey(ke);
+        return;
+    }
+
+    if (_state == ST_KEYCFG) {
+        handleKeyConfigKey(ke);
         return;
     }
 
@@ -847,7 +894,7 @@ void AppAI::handleSettingsKey(const Keyboard::KeyEvent_t& ke)
         return;
     }
     if (ke.keyCode == KEY_DOWN) {
-        if (_set_phase == 0 && _ap_sel + 1 < (int)_ap_list.size() + 1) {
+        if (_set_phase == 0 && _ap_sel + 1 < (int)_ap_list.size() + 2) {
             _ap_sel++;
             _dirty = true;
         }
@@ -864,19 +911,26 @@ void AppAI::handleSettingsKey(const Keyboard::KeyEvent_t& ke)
             return;
         }
         if (ke.keyCode == KEY_S || ke.keyCode == KEY_DOT) {
-            if (_ap_sel + 1 < (int)_ap_list.size() + 1) _ap_sel++;
+            if (_ap_sel + 1 < (int)_ap_list.size() + 2) _ap_sel++;
             _dirty = true;
             return;
         }
         if (ke.keyCode == KEY_ENTER || ke.keyCode == KEY_SLASH) {
-            if (_ap_sel < (int)_ap_list.size()) {
+            int n = (int)_ap_list.size();
+            if (_ap_sel < n) {
                 _ssid_buf = _ap_list[_ap_sel];
                 _pass_buf.clear();
                 _set_phase = 1;
-            } else {
+            } else if (_ap_sel == n) {
                 _ssid_buf.clear();
                 _pass_buf.clear();
                 _set_phase = 2;
+            } else {
+                // 配置 API Key：开热点 + 网页配置页
+                _state = ST_KEYCFG;
+                _want_setup = true;
+                _setup_auto = false;
+                _setup_started = false;
             }
             _dirty = true;
         }
@@ -959,6 +1013,13 @@ void AppAI::drawSettings()
         _canvas->setTextColor(sel ? 0x0000 : C_PINK_L);
         _canvas->setCursor(6, y);
         _canvas->print("手动输入网络");
+        y += 14;
+
+        bool sel_key = (_ap_sel == (int)_ap_list.size() + 1);
+        if (sel_key) _canvas->fillRoundRect(2, y - 1, W - 4, 14, 3, C_PINK);
+        _canvas->setTextColor(sel_key ? 0x0000 : C_PINK_L);
+        _canvas->setCursor(6, y);
+        _canvas->print("配置 API Key");
     } else if (_set_phase == 2) {
         _canvas->setTextColor(TFT_WHITE);
         _canvas->setCursor(6, 26);
@@ -992,6 +1053,134 @@ void AppAI::drawSettings()
     const char* hint = (_set_phase == 0) ? "E/S或;/. 选择  Enter确认  Tab返回"
                                         : (1 == _set_phase ? "输入密码  Enter连接  Tab返回"
                                                            : "输入名称  Enter下一步  Tab返回");
+    int hw = _canvas->textWidth(hint);
+    _canvas->setCursor((W - hw) / 2, _H - 14);
+    _canvas->print(hint);
+    _canvas->setFont(&fonts::efontCN_12);
+
+    if (!_toast.empty()) {
+        int tw = _canvas->textWidth(_toast.c_str());
+        int bx = (W - tw) / 2 - 6;
+        if (bx < 2) bx = 2;
+        _canvas->fillRoundRect(bx, _H - 36, tw + 12, 16, 5, C_PINK);
+        _canvas->setTextColor(0x0000);
+        _canvas->setCursor(bx + 6, _H - 34);
+        _canvas->print(_toast.c_str());
+    }
+}
+
+// ---------------- API Key 配置（热点 + 网页） ----------------
+
+void AppAI::startKeyConfig(bool auto_enter)
+{
+    _setup_auto = auto_enter;
+    _setup_started = false;
+    _setup_ok = false;
+    _setup_ssid.clear();
+    _setup_pass.clear();
+    _setup_url.clear();
+
+    std::string ssid, pass, url;
+    bool ok = AiKeySetup::start(ssid, pass, url);
+    _setup_ssid = ssid;
+    _setup_pass = pass;
+    _setup_url = url;
+    _setup_ok = ok;
+    _setup_started = ok;
+    _setup_key_seen = AiKeySetup::hasKey();
+    _last_setup_check = GetHAL().millis();
+    _state = ST_KEYCFG;
+    _dirty = true;
+    mclog::tagInfo(TAG, "key config start ok={} ssid='{}' url='{}'", ok, ssid.c_str(), url.c_str());
+}
+
+void AppAI::exitKeyConfig()
+{
+    if (_setup_started || AiKeySetup::isActive()) {
+        AiKeySetup::stop();
+    }
+    _setup_started = false;
+    _setup_ok = false;
+    _want_setup = false;  // 防止刚进入就退出时，待启动的请求又把热点拉起来
+    _state = ST_IDLE;
+    _dirty = true;
+    _lines_dirty = true;
+    _was_online = GetHAL().isWifiConnected();
+
+    if (AiKeySetup::hasKey()) {
+        GetHAL().wifiInit();
+        auto& store = ConfigStore::getInstance();
+        if (!store.getWifiSsid().empty()) {
+            startWifiJob(store.getWifiSsid(), store.getWifiPassword());
+            setToast("Key 已保存，正在联网");
+        } else {
+            setToast("Key 已保存，请配置 WiFi");
+        }
+    } else {
+        setToast("未配 Key，按 Tab 配置");
+    }
+    mclog::tagInfo(TAG, "key config exit, has_key={}", AiKeySetup::hasKey());
+}
+
+void AppAI::handleKeyConfigKey(const Keyboard::KeyEvent_t& ke)
+{
+    if (!ke.state) return;
+    bool is_tab = (ke.keyCode == KEY_TAB || ke.keyCode == 9 ||
+                   (ke.keyName && strcmp(ke.keyName, "tab") == 0));
+    if (ke.keyCode == KEY_ENTER || is_tab) {
+        exitKeyConfig();
+    }
+}
+
+void AppAI::drawKeyConfig()
+{
+    int W = _W;
+    _canvas->setTextColor(C_PINK_L);
+    _canvas->setCursor(6, 2);
+    _canvas->print("API Key 配置");
+
+    _canvas->setTextColor(C_DIM);
+    _canvas->setCursor(W - 48, 2);
+    _canvas->print("TAB返回");
+
+    _canvas->drawFastHLine(0, 17, W, C_PINK);
+
+    std::string masked = AiKeySetup::maskedKey();
+    _canvas->setCursor(6, 22);
+    if (masked.empty()) {
+        _canvas->setTextColor(TFT_ORANGE);
+        _canvas->print("当前Key: 未保存");
+    } else {
+        _canvas->setTextColor(TFT_GREEN);
+        _canvas->print(("当前Key: " + masked).c_str());
+    }
+
+    int y = 34;
+    if (!_setup_started) {
+        _canvas->setTextColor(C_PINK_L);
+        _canvas->setCursor(6, y + 10);
+        _canvas->print(_setup_ok ? "热点已启动" : "正在启动热点...");
+    } else {
+        _canvas->setTextColor(TFT_WHITE);
+        _canvas->setCursor(6, y);
+        _canvas->print(("热点: " + _setup_ssid).c_str());
+        y += 14;
+        _canvas->setCursor(6, y);
+        _canvas->print(("密码: " + _setup_pass).c_str());
+        y += 14;
+        _canvas->setTextColor(C_DIM);
+        _canvas->setCursor(6, y);
+        _canvas->print("手机连上后浏览器打开:");
+        y += 14;
+        _canvas->setTextColor(C_PINK_L);
+        _canvas->setCursor(6, y);
+        _canvas->print(_setup_url.c_str());
+    }
+
+    _canvas->setFont(&fonts::efontCN_10);
+    _canvas->setTextColor(C_DIM);
+    const char* hint = (_setup_started || _setup_ok) ? "网页里填写并保存  Enter完成  Tab返回"
+                                                    : "热点启动失败  Enter/Tab 返回";
     int hw = _canvas->textWidth(hint);
     _canvas->setCursor((W - hw) / 2, _H - 14);
     _canvas->print(hint);
@@ -1103,6 +1292,14 @@ void AppAI::pollJob()
     if (!ok) {
         _state = ST_IDLE;
         appendMsg(false, "[!] " + text);
+        // Key 无效/未配置/网络问题：给出可读指引，而不是停在思考中
+        bool key_hint = text.find("HTTP 401") != std::string::npos ||
+                        text.find("HTTP 403") != std::string::npos ||
+                        text.find("API Key") != std::string::npos ||
+                        text.find("Key") != std::string::npos;
+        if (key_hint) {
+            appendMsg(false, "[提示] 按 Tab 打开设置，选择「配置 API Key」重新填写。");
+        }
         _dirty = true;
         return;
     }
@@ -1393,6 +1590,12 @@ bool AppAI::doChat(const std::vector<Msg>& msgs, std::string& out)
     if (base.empty()) base = kDeepSeekBase;
     if (model.empty()) model = kDeepSeekModel;
 
+    // 既没有保存过 Key，也没有内置兜底：直接给出可操作的提示，不发起无效请求
+    if (key.empty()) {
+        out = "尚未配置 API Key：按 Tab 打开设置，选择「配置 API Key」";
+        return false;
+    }
+
     while (!base.empty() && base.back() == '/') base.pop_back();
 
     std::string url;
@@ -1483,6 +1686,12 @@ bool AppAI::doChat(const std::vector<Msg>& msgs, std::string& out)
                 if (em && em->valuestring) reason = em->valuestring;
             }
             cJSON_Delete(ej);
+        }
+        if (status == 401 || status == 403) {
+            out = "API Key 无效或已过期，请重新配置";
+            if (!reason.empty()) out += "：" + reason;
+            if (out.size() > 160) out = out.substr(0, 160) + "...";
+            return false;
         }
         char head[48];
         snprintf(head, sizeof(head), "请求失败 (HTTP %d)", status);
@@ -1906,6 +2115,16 @@ void AppAI::drawUI()
     if (_state == ST_SETTINGS) {
         drawSettings();
         // 设置页也要推到屏幕，否则按 Tab 后只会"卡一下"看不到任何变化
+        appCanvasPush(_canvas);
+        if (_H < appCanvasTargetH()) {
+            GetHAL().display().fillRect(0, _H, GetHAL().display().width(),
+                                        GetHAL().display().height() - _H, C_BG);
+        }
+        return;
+    }
+
+    if (_state == ST_KEYCFG) {
+        drawKeyConfig();
         appCanvasPush(_canvas);
         if (_H < appCanvasTargetH()) {
             GetHAL().display().fillRect(0, _H, GetHAL().display().width(),

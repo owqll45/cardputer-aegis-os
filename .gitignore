@@ -48,3 +48,9 @@ shots/
 *.apk
 asr_resp.txt
 asr_test.json
+
+# 本地截图与固件转储
+shot*.png
+ui_dumps/
+firmware_dump_physical.bin
+spiffs.bin

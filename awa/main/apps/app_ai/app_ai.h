@@ -21,6 +21,7 @@ private:
         ST_SPEAKING,   // 正在播放语音
         ST_RECORDING,  // 按住 V 录音
         ST_SETTINGS,   // WiFi 设置
+        ST_KEYCFG,     // 首次 API Key 配置（热点 + 网页）
     };
 
     struct Msg {
@@ -97,6 +98,17 @@ private:
     std::string _ssid_buf;
     std::string _pass_buf;
 
+    // API Key 配置（SoftAP + 网页）
+    bool _want_setup = false;      // 请求开热点（放到应用任务里做，避免阻塞按键回调）
+    bool _setup_started = false;   // 热点/配置页是否已启动
+    bool _setup_ok = false;        // 本次是否启动成功
+    bool _setup_auto = false;      // 首次进入自动弹出
+    bool _setup_key_seen = false;  // 上次看到的"是否已有 Key"，用于网页保存后刷新
+    uint32_t _last_setup_check = 0;
+    std::string _setup_ssid;
+    std::string _setup_pass;
+    std::string _setup_url;
+
     struct Petal {
         float x = 0, y = 0, vy = 0.6f, phase = 0;
         uint8_t size = 2;
@@ -120,6 +132,10 @@ private:
     void doScan();
     void handleSettingsKey(const Keyboard::KeyEvent_t& keyEvent);
     void drawSettings();
+    void startKeyConfig(bool auto_enter);
+    void exitKeyConfig();
+    void handleKeyConfigKey(const Keyboard::KeyEvent_t& keyEvent);
+    void drawKeyConfig();
     void pollJob();
     void appendMsg(bool user, const std::string& text);
     void setToast(const std::string& text);

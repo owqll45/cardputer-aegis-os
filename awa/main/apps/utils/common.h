@@ -7,7 +7,7 @@
 #include <hal/hal.h>
 #include <apps/utils/theme.h>
 
-#define FW_VERSION "AEGIS OS v2.1.0"
+#define FW_VERSION "AEGIS OS v2.1.1"
 
 // Dynamic Display Constants
 #define SCREEN_WIDTH  (GetHAL().canvas().width())
