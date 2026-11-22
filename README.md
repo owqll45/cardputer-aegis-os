@@ -23,19 +23,19 @@ AEGIS OS（中文名「玄甲」）是跑在 M5Stack Cardputer ADV 上的自制�
 
 Cardputer ADV 本体，跑完整系统、键盘输入和应用界面。
 
-组件仓库：见下（当前三部分同在本仓库，拆分后替换为对应链接）。
+组件仓库：本仓库（[cardputer-aegis-os](https://github.com/owqll45/cardputer-aegis-os)），也是 AEGIS OS 的总入口。
 
 ### C3 桥（两台 160×80）
 
 两台 ESP32-C3，接 SX1268 做 ESP-NOW ↔ LoRa 转发，同时提供 Meshtastic 兼容的 BLE 接口。
 
-组件仓库：见下（当前三部分同在本仓库，拆分后替换为对应链接）。
+组件仓库：[aegis-c3-bridge](https://github.com/owqll45/aegis-c3-bridge)。
 
 ### 监视器（320×240）
 
 一台 ESP32-C3，接收 GMKSTATE 状态帧并显示主机画面；433 天线未确认，只收不发。
 
-组件仓库：见下（当前三部分同在本仓库，拆分后替换为对应链接）。
+组件仓库：[aegis-monitor](https://github.com/owqll45/aegis-monitor)。
 
 三块板的分工：
 
@@ -164,6 +164,8 @@ gomoku_c3/          C3 监视器固件（320×240，状态镜像）
 backup/             旧版本应用备份（如 LegacyApp）
 d3/*.md             ZD 协议说明、BLE 接入方案、硬件实测报告
 ```
+
+C3 桥与监视器已拆到独立公开仓库，主仓库仍保留源码目录和现有构建路径；两块板可以单独取用，链接见「硬件与组网」。
 
 ## 已知限制
 
