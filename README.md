@@ -1,6 +1,8 @@
-# AEGIS OS（神盾）
+# AEGIS OS（玄甲）
 
-AEGIS OS 是给 **M5Stack Cardputer ADV** 写的自制掌上系统。主机是 ESP32-S3、240×135 屏幕、**没有 PSRAM**，应用框架用 Mooncake，UI 层用 smooth_ui_toolkit + LovyanGFX。除主机固件外，仓库里还有两套 ESP32-C3 外设固件：两台 160×80 的 LoRa/mesh 桥，和一台 320×240 的状态监视器。
+AEGIS OS（中文名「玄甲」）是跑在 M5Stack Cardputer ADV 上的自制系统，由 **ADV 主机 + 两台 C3 桥 + 一台 320×240 监视器**三部分组成。
+
+主机是 ESP32-S3、240×135 屏幕、**没有 PSRAM**，应用框架用 Mooncake，UI 层用 smooth_ui_toolkit + LovyanGFX。仓库里同时放着两台 160×80 的 LoRa/mesh 桥固件和一台 320×240 的状态监视器固件。
 
 这个系统不是模拟器合集，也不是桌面环境移植：所有应用都按 240×135、无 PSRAM、应用主任务渲染的约束重写，应用按需装载、退出即卸载，用 RAM 换功能。
 
@@ -13,8 +15,29 @@ AEGIS OS 是给 **M5Stack Cardputer ADV** 写的自制掌上系统。主机是 E
 - [版本](#版本)
 - [仓库结构](#仓库结构)
 - [已知限制](#已知限制)
+- [更新日志](CHANGELOG.md)
 
 ## 硬件与组网
+
+### ADV 主机（AEGIS OS / 玄甲）
+
+Cardputer ADV 本体，跑完整系统、键盘输入和应用界面。
+
+组件仓库：见下（当前三部分同在本仓库，拆分后替换为对应链接）。
+
+### C3 桥（两台 160×80）
+
+两台 ESP32-C3，接 SX1268 做 ESP-NOW ↔ LoRa 转发，同时提供 Meshtastic 兼容的 BLE 接口。
+
+组件仓库：见下（当前三部分同在本仓库，拆分后替换为对应链接）。
+
+### 监视器（320×240）
+
+一台 ESP32-C3，接收 GMKSTATE 状态帧并显示主机画面；433 天线未确认，只收不发。
+
+组件仓库：见下（当前三部分同在本仓库，拆分后替换为对应链接）。
+
+三块板的分工：
 
 | 设备 | 芯片 | 屏幕 | 射频 | 角色 |
 |---|---|---|---|---|
@@ -127,7 +150,7 @@ idf.py -C gomoku_c3 -p COM3 -b 460800 flash monitor
 - **v2.1.0** — [tag 2.1.0](https://github.com/owqll45/cardputer-aegis-os/tree/2.1.0)：斗地主、21 点等游戏落地，四款游戏实测修复，LegacyApp 下架并保留备份，API Key 外置到 secrets 头文件。
 - **v2.1.1** — [tag 2.1.1](https://github.com/owqll45/cardputer-aegis-os/tree/2.1.1)：DeepSeek 首次使用 SoftAP 配置 API Key，配置页支持尾号显示、清空、更换；修复配置模式退出后的 WiFi 重连。
 
-当前 `master` 即 2.1.1。
+当前 `master` 即 2.1.1。完整变更记录见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 仓库结构
 
