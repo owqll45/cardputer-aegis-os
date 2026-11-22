@@ -128,7 +128,7 @@ bool inlineMode()
     const char* fg = zd_fg_app();
     if (!fg) return false;
     if (strcmp(fg, "Launcher") == 0) return false;
-    if (strcmp(fg, "LegacyApp") == 0 || strcmp(fg, "BrainServer") == 0) return false;
+    if (strcmp(fg, "BrainServer") == 0) return false;
     return true;
 }
 
@@ -490,16 +490,16 @@ void update()
 
     if (notice) return; /* 非全屏: 通知层自己每帧推 */
 
-    /* 直接画屏的 app(LegacyApp 等)没有共享画布, 不叠任何东西 */
+    /* 直接画屏的 app 没有共享画布, 不叠任何东西 */
     if (!GetHAL().canvas().getBuffer()) return;
 
     /* app/游戏都可能 pushSprite 盖住顶栏, 所以前台有共享画布时由这里统一把顶栏顶回去;
      * 内容没变时只推屏不重画。桌面(Launcher)的那套自绘已经删掉, 同样走这里,
      * 保证全工程只有 ui_sysbar 一个顶栏绘制者。
-     * LegacyApp 直接画屏(不用共享画布), 也不能叠。 */
+     * 直接画屏的 app(不用共享画布)也不能叠。 */
     const char* fg = zd_fg_app();
     const bool desktop = (strcmp(fg, "Launcher") == 0);
-    const bool direct_draw = (strcmp(fg, "LegacyApp") == 0) || (strcmp(fg, "BrainServer") == 0);
+    const bool direct_draw = (strcmp(fg, "BrainServer") == 0);
     if (desktop != s_was_desktop) {
         /* 换前后台时顶栏画布里的内容可能是面板画的, 必须重画 */
         s_was_desktop = desktop;

@@ -1,4 +1,4 @@
-# Compile and Flash Script for legacy_app
+# Compile and Flash Script
 # Usage: ./compile_and_flash.ps1 [PORT]
 # Example: ./compile_and_flash.ps1 COM3
 
@@ -6,7 +6,7 @@ param (
     [string]$Port = ""
 )
 
-Write-Host ">>> legacy_app Build System v4.2 <<<" -ForegroundColor Cyan
+Write-Host ">>> Build System <<<" -ForegroundColor Cyan
 
 # Check for ESP-IDF
 if (!(Get-Command "idf.py" -ErrorAction SilentlyContinue)) {

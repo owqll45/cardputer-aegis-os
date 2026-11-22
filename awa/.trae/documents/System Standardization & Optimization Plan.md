@@ -15,19 +15,14 @@ I will implement the requested changes to standardize controls, fix system mute,
 - **Implementation:** Modify `main/hal/hal.cpp` in `Hal::setGlobalMute`.
 - **Logic:** Update `setGlobalMute` to explicitly call `M5.Speaker.setVolume(0)` when muted, and restore the volume from settings when unmuted. This ensures hardware-level silence.
 
-### 4. Optimize Memory in LegacyApp
-- **Goal:** Fix the "1KB free memory" issue when opening the ESP app.
-- **Implementation:** Modify `main/apps/app_legacy_app/app_legacy_app.cpp` in `onOpen`.
-- **Logic:** Explicitly call `GetHAL().wifiDeinit()` at the very beginning of `onOpen`. This ensures any WiFi resources from previous apps (like the Launcher or WiFi Scanner) are fully freed before LegacyApp initializes its own WiFi and graphics, preventing memory exhaustion.
-
-### 5. Verify Icons
+### 4. Verify Icons
 - **Goal:** Address "broken icons".
 - **Action:** I will inspect `main/utils/icons/default_icons.cpp` and `main/apps/app_launcher/view/menu/menu.cpp` to ensure icon assets are correctly referenced and loaded. If specific icons are missing, I will fix the references.
 
-### 6. Verification
+### 5. Verification
 - **Test:** Compile the firmware.
 - **Verify:**
     - Controls: Check if `;` moves selection up in Launcher.
-    - Exit: Check if `ESC` quits LegacyApp.
-    - Mute: Check if Mute toggle silences LegacyApp tones.
+    - Exit: Check if `ESC` quits the app.
+    - Mute: Check if Mute toggle silences tones.
     - Memory: Check logs for heap usage.

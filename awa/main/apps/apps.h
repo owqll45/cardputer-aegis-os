@@ -38,7 +38,6 @@
 #include "app_invaders/app_invaders.h"
 #include "app_minesweeper/app_minesweeper.h"
 #include "app_water_level/app_water_level.h"
-#include "app_legacy_app/app_legacy_app.h"
 // #include "app_brain_server/app_brain_server.h"  // DISABLED: user no longer needs PC AI cluster connection
 #include "app_multimeter/app_multimeter.h"
 #include "app_relay_test/app_relay_test.h"

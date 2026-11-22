@@ -82,7 +82,7 @@ def compile_firmware():
     Write-Host '>>> 配置 ESP-IDF 环境...' -ForegroundColor Yellow
     $env:IDF_PATH = '{ESP_IDF_PATH}'
     
-    Write-Host '>>> legacy_app Build System v4.2 <<<' -ForegroundColor Cyan
+    Write-Host '>>> Build System <<<' -ForegroundColor Cyan
     
     # 切换到构建目录
     Set-Location -Path '{BUILD_DIR}'

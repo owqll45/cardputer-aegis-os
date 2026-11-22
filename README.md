@@ -191,7 +191,7 @@ idf.py -C gomoku_c3 -p COM3 -b 460800 flash monitor
 
 ## 版本
 
-- **v2.1.0** — [tag 2.1.0](https://github.com/owqll45/cardputer-aegis-os/tree/2.1.0)：斗地主、21 点等游戏落地，四款游戏实测修复，LegacyApp 下架并保留备份，API Key 外置到 secrets 头文件。
+- **v2.1.0** — [tag 2.1.0](https://github.com/owqll45/cardputer-aegis-os/tree/2.1.0)：斗地主、21 点等游戏落地，四款游戏实测修复，API Key 外置到 secrets 头文件。
 - **v2.1.1** — [tag 2.1.1](https://github.com/owqll45/cardputer-aegis-os/tree/2.1.1)：DeepSeek 首次使用 SoftAP 配置 API Key，配置页支持尾号显示、清空、更换；修复配置模式退出后的 WiFi 重连。
 
 当前 `master` 即 2.1.1。完整变更记录见 [CHANGELOG.md](CHANGELOG.md)。
@@ -205,7 +205,6 @@ awa/                系统本体固件（ESP32-S3，Mooncake）
   main/hal/         显示、网络、存储、AI
 d3/c3msg/           C3 桥固件（160×80，Meshtastic 兼容 LoRa）
 gomoku_c3/          C3 监视器固件（320×240，状态镜像）
-backup/             旧版本应用备份（如 LegacyApp）
 d3/*.md             ZD 协议说明、BLE 接入方案、硬件实测报告
 ```
 
@@ -218,5 +217,4 @@ C3 桥与监视器已拆到独立公开仓库，主仓库仍保留源码目录�
 - **LoRa 没有长距离拉距数据**：只做了室内/同层的收发、延迟和带宽实测（全量镜像块最坏等待约 2.0 秒）。433MHz、22dBm 的理论视距不能当成这个项目的实测距离，城市环境请按短距预期。
 - **动作类游戏不镜像**：LoRa 兜底只覆盖低频状态类应用，打砖块、Flappy、小蜜蜂、赛车、FPS 会明确提示「链路不支持镜像」。
 - **Meshtastic 手机端**：BLE 协议层和等价客户端验证通过，官方 App 的完整人工流程尚未在所有手机型号上复测。
-- **历史里仍有 APK**：`awa/*.apk` 是早期 LegacyApp 控制器的安装包备份，共 26 个，仍在 Git 历史中。`.gitignore` 已写 `*.apk`，但对已跟踪文件不生效；它们不含密钥，只是体积偏大。
 - **截图不入库**：`shots/` 已被忽略，仓库里不放截图。需要看界面时，本地 `d3/` 下有开发期截图（`ui_inline_*.png`、`ui_sysbar_*.png` 等），不在版本控制里。

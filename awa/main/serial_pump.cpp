@@ -39,7 +39,7 @@ static void dispatch_line(const std::string& line)
     if (s_handler) {
         s_handler(line);
     } else {
-        // 排队等 LegacyApp 打开 (最多 8 条)
+        // 排队等应用打开 (最多 8 条)
         if (s_pending.size() >= 8) s_pending.pop_front();
         s_pending.push_back(line);
         ESP_LOGI(TAG, "cmd queued (no handler): %zu", s_pending.size());

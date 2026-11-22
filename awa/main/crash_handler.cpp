@@ -45,7 +45,7 @@ void check_for_crash()
 {
     esp_reset_reason_t reason = esp_reset_reason();
 
-    // 如果是有意重启（如 LegacyApp 退出），直接跳过経溃界面
+    // 如果是有意重启（应用主动退出），直接跳过崩溃界面
     if (_intentional_restart_flag == INTENTIONAL_RESTART_MAGIC) {
         _intentional_restart_flag = 0;
         _magic_word               = 0;

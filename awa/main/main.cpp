@@ -14,10 +14,6 @@
 #include <apps.h>
 #include <hal.h>
 #include <apps/app_extras/app_extras.h>
-// [LegacyApp 已下架 2.1.0] 代码保留在 apps/app_legacy_app/ 与 backup/LegacyApp_v2.0.0/,
-// 恢复时放开下面这行 include、main.cpp 里的 system_wifi 全局与 RegisterApp 行,
-// 并去掉 CMakeLists.txt 里 app_legacy_app 的 EXCLUDE。
-// #include "apps/app_legacy_app/legacy_app_wifi.h"
 #include "apps/app_relay_test/app_relay_test.h"
 #include "apps/app_multimeter/app_multimeter.h"
 #include "soc/soc.h"
@@ -69,8 +65,6 @@ static void run_heap_test()
 
     for (size_t i = 0; i < reg.size(); i++) {
         const std::string name = reg[i].name;
-        // LegacyApp 会写倒计时状态并可能自动拉活, 跳过避免污染系统状态
-        if (name == "LegacyApp") continue;
 
         for (int cyc = 0; cyc < 2; cyc++) {
             uint32_t h0 = perf_free_kb(), l0 = perf_largest_kb();
@@ -126,7 +120,6 @@ static void run_soak_test()
 
     for (int round = 1; round <= 3; round++) {
         for (size_t i = 0; i < reg.size(); i++) {
-            if (reg[i].name == "LegacyApp") continue;
             int mid = InstallFromRegistry(i);
             if (mid < 0) continue;
             GetMooncake().openApp(mid);
@@ -153,13 +146,6 @@ static volatile int s_inj_code = 0;
 static volatile int s_inj_down = 0;
 static char s_inj_name[16] = "";
 static void zd_inject_key(KeScanCode_t code, const char* name, bool down);
-
-// [LegacyApp 已下架 2.1.0] 全局 WiFi 守护对象随模块一起摘除(其 init 本来就是注释状态)。
-// LegacyAppWifi system_wifi;
-bool should_launch_bomb = false;
-void system_cmd_handler(const char* cmd) {
-    if (strstr(cmd, "POWER:ON")) should_launch_bomb = true;
-}
 
 // FreeRTOS task handles
 TaskHandle_t desktop_task_handle = NULL;
@@ -889,8 +875,7 @@ static void all_tick()
  *   3) key    注入方向键后画面有变化(按键有响应);
  *   4) alive  测完仍在运行(没崩、没被看门狗重启);
  *   5) back   G0 侧键/Esc 能回到桌面。
- * 每项 check 行后停留 3.4s, 主机脚本在这段时间发 ZDSHOT 存图。
- * LegacyApp 会改写倒计时状态, 不在自测范围。 */
+ * 每项 check 行后停留 3.4s, 主机脚本在这段时间发 ZDSHOT 存图。 */
 struct ZdFrameSig {
     int w = 0, h = 0;
     uint32_t hash = 0;
@@ -968,12 +953,7 @@ static int s_at_retry = 0;
 
 static int zd_apptest_count()
 {
-    auto& reg = GetAppRegistry();
-    int n = 0;
-    for (size_t i = 0; i < reg.size(); i++) {
-        if (reg[i].name != "LegacyApp") n++;
-    }
-    return n;
+    return (int)GetAppRegistry().size();
 }
 
 static const char* zd_apptest_name(int idx)
@@ -981,7 +961,6 @@ static const char* zd_apptest_name(int idx)
     auto& reg = GetAppRegistry();
     int n = 0;
     for (size_t i = 0; i < reg.size(); i++) {
-        if (reg[i].name == "LegacyApp") continue;
         if (n == idx) return reg[i].name.c_str();
         n++;
     }
@@ -995,7 +974,7 @@ static void apptest_begin(int start = 0)
     s_at_fail = 0;
     s_at_stage = 0;
     s_at_ts = zdlink_now_ms();
-    ZT("apptest", "start apps=%d skip=LegacyApp", zd_apptest_count());
+    ZT("apptest", "start apps=%d", zd_apptest_count());
 }
 
 static void apptest_tick()
@@ -1208,20 +1187,6 @@ void desktop_task(void *pvParameters)
         all_tick();   /* 全屏 app 逐一复核(ZDALL) */
         apptest_tick(); /* 应用全量自测(ZDAPPTEST) */
 
-        if (should_launch_bomb) {
-            should_launch_bomb = false;
-            
-            // Debounce to prevent screen flickering from multiple requests
-            static uint32_t last_launch_ts = 0;
-            if (GetHAL().millis() - last_launch_ts > 5000) {
-                last_launch_ts = GetHAL().millis();
-                mclog::tagInfo("System", "REMOTE LAUNCH TRIGGERED");
-                GetMooncake().openApp(0);
-            } else {
-                mclog::tagInfo("System", "Launch ignored (debounce)");
-            }
-        }
-        
         GetHAL().feedTheDog();
     }
 }
@@ -1299,9 +1264,6 @@ extern "C" void app_main(void)
     // Apps are instantiated ONLY when opened, and freed when closed.
     ESP_LOGI("MAIN", "=== DEBUG: Registering apps (lazy) ===");
     
-    // [LegacyApp 已下架 2.1.0] 入口与注册移除此行即从启动器消失;
-    // 恢复方法见 backup/LegacyApp_v2.0.0/RESTORE.md
-    // RegisterApp<AppLegacyApp>("LegacyApp");
     RegisterApp<AppMultimeter>("Multimeter");
     RegisterApp<AppSetWiFi>("Network");
     RegisterApp<AppClock>("Clock");
@@ -1387,29 +1349,6 @@ extern "C" void app_main(void)
     // Start the app task
     app_task_running = true;
     perf_boot("tasks_created");
-    
-    // === 倒计时自动恢复：重启后如果有未完成的倒计时，自动启动 LegacyApp 续时 ===
-    {
-        nvs_handle_t nh;
-        if (nvs_open("storage", NVS_READONLY, &nh) == ESP_OK) {
-            uint8_t cd = 0;
-            if (nvs_get_u8(nh, "cnt_down", &cd) == ESP_OK && cd == 1) {
-                ESP_LOGI("MAIN", "=== Active countdown found! Auto-resuming LegacyApp ===");
-                // Find LegacyApp in registry and auto-open it
-                auto& reg = GetAppRegistry();
-                for (size_t i = 0; i < reg.size(); i++) {
-                    if (reg[i].name == "LegacyApp") {
-                        int mid = InstallFromRegistry(i);
-                        if (mid >= 0) {
-                            GetMooncake().openApp(mid);
-                        }
-                        break;
-                    }
-                }
-            }
-            nvs_close(nh);
-        }
-    }
     
     // === 开机静默自检 (O8): 快速硬件检测写 SD, 不打扰界面 ===
     {
@@ -1844,27 +1783,6 @@ extern "C" void app_main(void)
             ESP_LOGI("NTF", "selftest low-heap threshold restored");
         }
 
-        // === 指令自动唤醒: 任何界面收到指令 → 立即自动打开 LegacyApp 执行 ===
-        // 但 ZD* 是本机诊断/自测命令, 由 main 自己处理, 不要抢去开 LegacyApp
-        // (否则一开发就夺走串口 handler, 后续命令全部进 LegacyApp)。
-        if (SerialPump::pendingCount() > 0) {
-            std::string head = SerialPump::peekPending();
-            const bool diag = (head.rfind("ZD", 0) == 0) || (head == "RESET");
-            if (!diag) {
-                auto& reg = GetAppRegistry();
-                for (size_t i = 0; i < reg.size(); i++) {
-                    if (reg[i].name == "LegacyApp" && reg[i].cached_id < 0) {
-                        ESP_LOGI("MAIN", "=== Command received! Auto-launching LegacyApp ===");
-                        int mid = InstallFromRegistry(i);
-                        if (mid >= 0) {
-                            GetMooncake().openApp(mid);
-                        }
-                        break;
-                    }
-                }
-            }
-        }
-        
         vTaskDelay(20 / portTICK_PERIOD_MS);
     }
 }

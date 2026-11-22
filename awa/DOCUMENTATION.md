@@ -122,7 +122,6 @@ zd/
 │   ├── main/              # 源代码目录
 │   │   ├── apps/          # 应用程序
 │   │   │   ├── app_launcher/   # 启动器
-│   │   │   ├── app_legacy_app/   # LegacyApp应用
 │   │   │   ├── app_dht11/      # 温湿度传感器
 │   │   │   └── ...
 │   │   ├── hal/           # 硬件抽象层
