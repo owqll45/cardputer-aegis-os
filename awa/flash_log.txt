@@ -1,3 +1,0 @@
-﻿ninja failed with exit code 1, output of the command is in the C:\Users\awa\Doc
-uments\trae_projects\zd\awa\build\log\idf_py_stderr_output_27276 and C:\Users\a
-wa\Documents\trae_projects\zd\awa\build\log\idf_py_stdout_output_27276
