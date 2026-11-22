@@ -173,6 +173,10 @@ idf.py -C gomoku_c3 -p COM3 -b 460800 flash monitor
 
 串口按实际枚举调整：本机 ADV 在 `COM9`，C3 在 `COM3`，烧录波特率 `460800`。C3 的日志走 USB-Serial/JTAG，不依赖波特率。首次给 C3 工程构建时如提示 target 不匹配，先执行一次 `idf.py -C <工程目录> set-target esp32c3`。
 
+### 一键刷写包（Windows）
+
+不想装 ESP-IDF 时，直接下载 [2.1.1 一键刷写包](https://github.com/owqll45/cardputer-aegis-os/releases/tag/2.1.1)：解压后双击 `flash_aegis.bat`，脚本自动列出串口、默认 460800、写完自动校验；刷写覆盖 Flash 固件区（含 NVS），设置会被清空，固件未内置 API Key。详细步骤和失败救援见包内 `FLASHING.md`。
+
 ### DeepSeek Key
 
 仓库不包含 `awa/main/apps/app_ai/app_ai_secrets.h`（已在 `.gitignore` 中）。如果想在编译期内置兜底 Key，自己创建：
