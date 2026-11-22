@@ -22,7 +22,7 @@
 ### 协议与文档
 
 - README 中补充三块板的分工与接线说明，并把 C3 桥、监视器的组件仓库链接指向拆分后的公开仓库（本次提交）。
-- 仓库拆分：`d3/c3msg` 与 `gomoku_c3` 用 `git subtree split` 抽出独立历史，分别发布为 `aegis-c3-bridge` 和 `aegis-monitor`；主仓库保留 ADV 系统并作为总入口，三个 README 互链（本次提交）。
+- 仓库拆分：`d3/c3msg` 与 `gomoku_c3` 用 `git subtree split` 抽出独立历史，分别发布为 `aegis-c3-bridge` 和 `aegis-monitor`；主仓库保留 ADV 上的系统本体，三个 README 互链（本次提交）。
 
 ## 2.1.1 — 2026-11-21
 
@@ -77,7 +77,7 @@
 - `c3msg` 源码从临时目录迁入 `d3/c3msg`，拆成 display / lora / ble_mesh / monitor 模块，后续能单独编译和定位问题（`eca8d5b`）。
 - LoRa 档位表落地：默认 `LONG_FAST`（SF11/BW250），保留 `LONG_SLOW`（SF12/BW125）兼容，设置页可在运行期切换，用来在速度和距离之间取舍（`eca8d5b`）。
 - B 板（31:D0）天线未确认前按 14 dBm 保守发射，启动日志打印当前发射策略，避免在不知道天线状态时满功率工作（`eca8d5b`）。
-- 新增 ZT_TIME（type=8）和 LoRa 私有 port `0x0101` 的 UTC 广播，没网也能让主机和 C3 对时（`eca8d5b`）。
+- 新增 ZT_TIME（type=8）和 LoRa 私有 port `0x0101` 的 UTC 广播，没网也能让系统本体和 C3 对时（`eca8d5b`）。
 - ESP-NOW 收缩为只服务「ADV ↔ 就近 C3」，`0x7D` 段来源的整帧直接丢弃，避免 C3 之间互相转发造成重复消息（`eca8d5b`）。
 - 新增 `mirror.c`：LoRa 私有 port `0x0102`，全量 120B×2 分块、差分 run 编码、按应用分级；ESP-NOW 断了以后监视器仍能刷新（`6622a1f`）。
 - 镜像走独立单槽队列，文本和时间优先，发送路径上限从 64B 提到 160B，避免镜像把聊天和校时堵住（`6622a1f`）。
